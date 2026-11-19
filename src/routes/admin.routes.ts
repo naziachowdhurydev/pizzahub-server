@@ -183,9 +183,20 @@ router.put(
         });
       }
 
+      const updatedProduct = await mongoDB.collection("products").findOne({
+        _id: new ObjectId(id),
+      });
+      if (!updatedProduct) {
+        return res.status(404).json({
+          success: false,
+          message: "Product not found.",
+        });
+      }
+
       res.json({
         success: true,
         message: "Product updated successfully.",
+        data: updatedProduct,
       });
     } catch {
       res.status(500).json({

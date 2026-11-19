@@ -98,6 +98,180 @@ router.post("/", requireAuth, allowRoles("customer", "admin"), async (req, res) 
   }
 });
 
+
+router.post(
+  "/checkout",
+  requireAuth,
+  allowRoles("customer"),
+  async (req, res) => {
+    try {
+      const { deliveryAddress, phone, notes } = req.body as {
+        deliveryAddress?: string;
+        phone?: string;
+        notes?: string;
+      };
+
+      if (
+        typeof deliveryAddress !== "string" ||
+        !deliveryAddress.trim() ||
+        typeof phone !== "string" ||
+        !phone.trim()
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Delivery address and phone are required.",
+        });
+      }
+
+      const userId = req.authUser!.id;
+
+      const cart = await mongoDB.collection("carts").findOne({
+        userId,
+      });
+
+      if (!cart || !Array.isArray(cart.items) || cart.items.length === 0) {
+        return res.status(400).json({
+          success: false,
+          message: "Your cart is empty.",
+        });
+      }
+
+      const cartItems = cart.items as Array<{
+        productId: ObjectId;
+        size: string;
+        quantity: number;
+      }>;
+
+      const productIds = cartItems.map((item) => item.productId);
+
+      const products = await mongoDB.collection("products").find({
+        _id: { $in: productIds },
+        isAvailable: true,
+      }).toArray();
+
+      if (products.length !== new Set(productIds.map(String)).size) {
+        return res.status(400).json({
+          success: false,
+          message: "Some products in your cart are unavailable.",
+        });
+      }
+
+      const orderItems = [];
+
+      for (const item of cartItems) {
+        if (
+          !ObjectId.isValid(String(item.productId)) ||
+          !Number.isInteger(item.quantity) ||
+          item.quantity < 1 ||
+          item.quantity > 20 ||
+          typeof item.size !== "string"
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: "Your cart contains an invalid item.",
+          });
+        }
+
+        const product = products.find(
+          (p) => String(p._id) === String(item.productId),
+        );
+
+        if (!product) {
+          return res.status(400).json({
+            success: false,
+            message: "A product in your cart is unavailable.",
+          });
+        }
+
+        if (
+          Array.isArray(product.sizes) &&
+          !product.sizes.includes(item.size)
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: `${product.name} is not available in ${item.size} size.`,
+          });
+        }
+
+        if (
+          typeof product.price !== "number" ||
+          !Number.isFinite(product.price) ||
+          product.price < 0
+        ) {
+          return res.status(400).json({
+            success: false,
+            message: "A product has an invalid price.",
+          });
+        }
+
+        orderItems.push({
+          productId: product._id,
+          name: product.name,
+          image: product.image ?? "",
+          size: item.size,
+          price: product.price,
+          quantity: item.quantity,
+          subtotal: product.price * item.quantity,
+        });
+      }
+
+      const subtotal = orderItems.reduce(
+        (sum, item) => sum + item.subtotal,
+        0,
+      );
+
+      // Example delivery fee. You can change this to your business rule.
+      const deliveryFee = 3;
+      const total = subtotal + deliveryFee;
+
+      const order = {
+        userId,
+        customerName: req.authUser!.name,
+        customerEmail: req.authUser!.email,
+        items: orderItems,
+        subtotal,
+        deliveryFee,
+        total,
+        deliveryAddress: deliveryAddress.trim(),
+        phone: phone.trim(),
+        notes: typeof notes === "string" ? notes.trim() : "",
+        status: "pending",
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      };
+
+      const result = await mongoDB.collection("orders").insertOne(order);
+
+      await mongoDB.collection("carts").updateOne(
+        { userId },
+        {
+          $set: {
+            items: [],
+            updatedAt: new Date(),
+          },
+        },
+      );
+
+      return res.status(201).json({
+        success: true,
+        message: "Your order has been placed successfully.",
+        data: {
+          ...order,
+          _id: result.insertedId,
+        },
+      });
+    } catch (error) {
+      console.error("Checkout error:", error);
+
+      return res.status(500).json({
+        success: false,
+        message: "Could not place your order.",
+      });
+    }
+  },
+);
+
+
 // Customer: Get own orders
 router.get("/my", requireAuth, async (req, res) => {
   try {

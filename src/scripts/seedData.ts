@@ -25,10 +25,10 @@ async function seed() {
   try {
     await connectDatabase();
     for (const category of categories) {
-      await mongoDB.collection("categories").updateOne({ slug: category.slug }, { $set: category }, { upsert: true });
+      await mongoDB.collection("categories").updateOne({ slug: category.slug }, { $setOnInsert: category }, { upsert: true });
     }
     for (const product of products) {
-      await mongoDB.collection("products").updateOne({ slug: product.slug }, { $set: product }, { upsert: true });
+      await mongoDB.collection("products").updateOne({ slug: product.slug }, { $setOnInsert: product }, { upsert: true });
     }
     console.log(`Seed complete: ${categories.length} categories and ${products.length} products.`);
   } catch (error) {
