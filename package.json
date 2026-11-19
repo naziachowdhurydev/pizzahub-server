@@ -1,0 +1,28 @@
+{
+  "name": "pizzahub-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "seed:data": "tsx src/scripts/seedData.ts"
+  },
+  "dependencies": {
+    "@better-auth/mongo-adapter": "latest",
+    "better-auth": "latest",
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "jose": "latest",
+    "mongodb": "^7.9.0"
+  },
+  "devDependencies": {
+    "@types/cors": "latest",
+    "@types/express": "latest",
+    "@types/node": "latest",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}
