@@ -61,6 +61,7 @@ router.post("/", requireAuth, allowRoles("customer", "admin"), async (req, res) 
 
       return {
         productId: product._id,
+        vendorId: typeof product.vendorId === "string" ? product.vendorId : null,
         name: product.name,
         price: product.price,
         quantity: item.quantity,
@@ -206,6 +207,7 @@ router.post(
 
         orderItems.push({
           productId: product._id,
+          vendorId: typeof product.vendorId === "string" ? product.vendorId : null,
           name: product.name,
           image: product.image ?? "",
           size: item.size,
