@@ -5,11 +5,13 @@ import orderRoutes from "./order.routes.js";
 import adminRoutes from "./admin.routes.js";
 import customerRoutes from "./customer.routes.js";
 import vendorRoutes from "./vendor.routes.js";
+import cartRoutes from "./cart.route.js";
 
 const router = Router();
 router.use("/", catalogRoutes);
 router.use("/users", userRoutes);
 router.use("/orders", orderRoutes);
+router.use("/cart", cartRoutes);
 router.use("/customer", customerRoutes);
 router.use("/vendor", vendorRoutes);
 router.use("/admin", adminRoutes);

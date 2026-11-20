@@ -30,7 +30,21 @@ const products = [
   { name: "Garlic Prawn", slug: "garlic-prawn", description: "Garlic prawns, parsley, mozzarella and a bright lemon finish.", category: "Seafood", price: 980, image: "https://images.unsplash.com/photo-1513104890138-7c749659a591?auto=format&fit=crop&w=900&q=85", rating: 4.8, isFeatured: false },
   { name: "Meat Feast", slug: "meat-feast", description: "Pepperoni, beef, chicken sausage and extra cheese.", category: "Meat Lovers", price: 990, image: "https://images.unsplash.com/photo-1593560708920-61dd98c46a4e?auto=format&fit=crop&w=900&q=85", rating: 4.9, isFeatured: true },
   { name: "Mushroom Truffle", slug: "mushroom-truffle", description: "Roasted mushrooms, mozzarella, herbs and a truffle oil drizzle.", category: "Specialty", price: 870, image: "https://images.unsplash.com/photo-1571407970349-bc81e7e96d47?auto=format&fit=crop&w=900&q=85", rating: 4.8, isFeatured: false },
-].map(item => ({ ...item, sizes: ["Regular", "Large"], isAvailable: true, createdAt: new Date(), updatedAt: new Date() }));
+].map(item => ({
+  ...item,
+  ingredients: [
+    "Hand-stretched dough",
+    "Tomato sauce",
+    "Mozzarella",
+    `${item.category} toppings`,
+  ],
+  allergens: ["Wheat (gluten)", "Milk"],
+  preparationTime: "20–25 minutes",
+  sizes: ["Regular", "Large"],
+  isAvailable: true,
+  createdAt: new Date(),
+  updatedAt: new Date(),
+}));
 
 async function seed() {
   try {
@@ -39,7 +53,15 @@ async function seed() {
       await mongoDB.collection("categories").updateOne({ slug: category.slug }, { $setOnInsert: category }, { upsert: true });
     }
     for (const product of products) {
-      await mongoDB.collection("products").updateOne({ slug: product.slug }, { $setOnInsert: product }, { upsert: true });
+      const { ingredients, allergens, preparationTime, ...insertData } = product;
+      await mongoDB.collection("products").updateOne(
+        { slug: product.slug },
+        {
+          $setOnInsert: insertData,
+          $set: { ingredients, allergens, preparationTime },
+        },
+        { upsert: true },
+      );
     }
     console.log(`Seed complete: ${categories.length} categories and ${products.length} products.`);
   } catch (error) {

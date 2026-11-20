@@ -23,7 +23,7 @@ router.get("/products", async (_req, res) => {
 
 router.get("/products/:slug", async (req, res) => {
   try {
-    const product = await mongoDB.collection("products").findOne({ slug: req.params.slug, isAvailable: true });
+    const product = await mongoDB.collection("products").findOne({ slug: req.params.slug });
     if (!product) return res.status(404).json({ success: false, message: "Pizza not found." });
     res.json({ success: true, data: product });
   } catch {

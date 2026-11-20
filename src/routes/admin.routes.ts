@@ -1,10 +1,27 @@
 
 import { Router } from "express";
-import { ObjectId } from "mongodb";
+import { ObjectId, type Filter } from "mongodb";
 import { mongoDB } from "../config/db.js";
 import { requireAuth, allowRoles } from "../middleware/auth.js";
 
 const router = Router();
+
+type AuthUserDocument = {
+  _id: string | ObjectId;
+  id?: string;
+  name?: string;
+  email?: string;
+  image?: string | null;
+  role?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+};
+
+function authUserFilter(id: string): Filter<AuthUserDocument> {
+  const clauses: Filter<AuthUserDocument>[] = [{ _id: id }, { id }];
+  if (ObjectId.isValid(id)) clauses.push({ _id: new ObjectId(id) });
+  return { $or: clauses };
+}
 
 // GET: View all products
 router.get("/products", requireAuth, allowRoles("admin"), async (_req, res) => {
@@ -276,6 +293,68 @@ router.get("/users", requireAuth, allowRoles("admin"), async (_req, res) => {
   }
 });
 
+router.get(
+  "/users/:id/details",
+  requireAuth,
+  allowRoles("admin"),
+  async (req, res) => {
+    try {
+      const id = String(req.params.id);
+      const userFilter = authUserFilter(id);
+      const user = await mongoDB.collection<AuthUserDocument>("user").findOne(userFilter, {
+        projection: {
+          _id: 1,
+          id: 1,
+          name: 1,
+          email: 1,
+          image: 1,
+          role: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      });
+      if (!user) {
+        return res.status(404).json({ success: false, message: "User not found." });
+      }
+
+      const userId = String(user.id ?? user._id);
+      const [sessions, linkedAccounts] = await Promise.all([
+        mongoDB
+          .collection("session")
+          .find({ userId })
+          .project({ createdAt: 1, updatedAt: 1, expiresAt: 1 })
+          .sort({ createdAt: -1 })
+          .toArray(),
+        mongoDB
+          .collection("account")
+          .find({ userId })
+          .project({ providerId: 1, createdAt: 1, updatedAt: 1 })
+          .toArray(),
+      ]);
+
+      res.json({
+        success: true,
+        data: {
+          user,
+          sessions: sessions.map((session) => ({
+            id: String(session.id ?? session._id),
+            createdAt: session.createdAt,
+            updatedAt: session.updatedAt,
+            expiresAt: session.expiresAt,
+          })),
+          linkedAccounts,
+        },
+      });
+    } catch (error) {
+      console.error("Load user details failed:", error);
+      res.status(500).json({
+        success: false,
+        message: "Could not load user details.",
+      });
+    }
+  },
+);
+
 router.patch(
   "/users/:id/role",
   requireAuth,
@@ -284,7 +363,10 @@ router.patch(
     try {
       const id = String(req.params.id);
       const { role } = req.body as { role?: unknown };
-      if (!["customer", "vendor", "admin"].includes(String(role))) {
+      if (
+        typeof role !== "string" ||
+        !["customer", "vendor", "admin"].includes(role)
+      ) {
         return res.status(400).json({
           success: false,
           message: "Role must be customer, vendor or admin.",
@@ -297,10 +379,8 @@ router.patch(
         });
       }
 
-      const userFilter = ObjectId.isValid(id)
-        ? { $or: [{ _id: new ObjectId(id) }, { id }] }
-        : { id };
-      const result = await mongoDB.collection("user").updateOne(
+      const userFilter = authUserFilter(id);
+      const result = await mongoDB.collection<AuthUserDocument>("user").updateOne(
         userFilter,
         { $set: { role, updatedAt: new Date() } },
       );
@@ -308,7 +388,7 @@ router.patch(
         return res.status(404).json({ success: false, message: "User not found." });
       }
 
-      const user = await mongoDB.collection("user").findOne(userFilter, {
+      const user = await mongoDB.collection<AuthUserDocument>("user").findOne(userFilter, {
         projection: { name: 1, email: 1, image: 1, role: 1, createdAt: 1, id: 1 },
       });
       res.json({ success: true, data: user });
@@ -372,15 +452,9 @@ router.patch(
       }
 
       if (status === "approved") {
-        const userFilter = ObjectId.isValid(String(application.userId))
-          ? {
-              $or: [
-                { _id: new ObjectId(String(application.userId)) },
-                { id: String(application.userId) },
-              ],
-            }
-          : { id: String(application.userId) };
-        const userUpdate = await mongoDB.collection("user").updateOne(
+        const applicantId = String(application.userId);
+        const userFilter = authUserFilter(applicantId);
+        const userUpdate = await mongoDB.collection<AuthUserDocument>("user").updateOne(
           userFilter,
           { $set: { role: "vendor", updatedAt: new Date() } },
         );

@@ -10,12 +10,19 @@ const router = Router();
 router.post("/", requireAuth, allowRoles("customer", "admin"), async (req, res) => {
   try {
     const { items, deliveryAddress, phone } = req.body as {
-      items?: Array<{ productId: string; quantity: number }>;
+      items?: Array<{ productId: string; size?: string; quantity: number }>;
       deliveryAddress?: string;
       phone?: string;
     };
 
-    if (!Array.isArray(items) || items.length === 0 || !deliveryAddress || !phone) {
+    if (
+      !Array.isArray(items) ||
+      items.length === 0 ||
+      typeof deliveryAddress !== "string" ||
+      !deliveryAddress.trim() ||
+      typeof phone !== "string" ||
+      !phone.trim()
+    ) {
       return res.status(400).json({
         success: false,
         message: "Items, delivery address and phone are required.",
@@ -25,10 +32,14 @@ router.post("/", requireAuth, allowRoles("customer", "admin"), async (req, res) 
     if (
       items.some(
         (item) =>
+          !item ||
+          typeof item.productId !== "string" ||
           !ObjectId.isValid(item.productId) ||
           !Number.isInteger(item.quantity) ||
           item.quantity < 1 ||
-          item.quantity > 20
+          item.quantity > 20 ||
+          (item.size !== undefined &&
+            (typeof item.size !== "string" || !item.size.trim()))
       )
     ) {
       return res.status(400).json({
@@ -54,19 +65,37 @@ router.post("/", requireAuth, allowRoles("customer", "admin"), async (req, res) 
       });
     }
 
-    const orderItems = items.map((item) => {
-      const product = products.find(
-        (p) => String(p._id) === item.productId
-      )!;
+    const orderItems = [];
+    for (const item of items) {
+      const product = products.find((p) => String(p._id) === item.productId);
+      if (!product) {
+        return res.status(400).json({
+          success: false,
+          message: "One or more products are unavailable.",
+        });
+      }
+      if (
+        item.size &&
+        Array.isArray(product.sizes) &&
+        !product.sizes.includes(item.size)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: `${product.name} is not available in ${item.size} size.`,
+        });
+      }
 
-      return {
+      orderItems.push({
         productId: product._id,
         vendorId: typeof product.vendorId === "string" ? product.vendorId : null,
         name: product.name,
+        image: product.image ?? "",
+        size: item.size ?? product.sizes?.[0] ?? "Regular",
         price: product.price,
         quantity: item.quantity,
-      };
-    });
+        subtotal: product.price * item.quantity,
+      });
+    }
 
     const total = orderItems.reduce(
       (sum, item) => sum + item.price * item.quantity,
@@ -78,8 +107,8 @@ router.post("/", requireAuth, allowRoles("customer", "admin"), async (req, res) 
       customerName: req.authUser!.name,
       items: orderItems,
       total,
-      deliveryAddress,
-      phone,
+      deliveryAddress: deliveryAddress.trim(),
+      phone: phone.trim(),
       status: "pending",
       createdAt: new Date(),
       updatedAt: new Date(),
