@@ -1,29 +1,43 @@
-import { Router } from "express";
+import { Router, type RequestHandler } from "express";
 import { ObjectId } from "mongodb";
 import { mongoDB } from "../config/db.js";
-import { requireAuth, requireVendor } from "../middleware/auth.js";
+import {
+  requireApprovedVendor,
+  requireAuth,
+  requireVendor,
+} from "../middleware/auth.js";
+import {
+  getItemStatus,
+  getOrderStatus,
+  isOrderStatus,
+  vendorStatusTransitions,
+  type OrderRecord,
+  type OrderStatus,
+} from "../lib/order-management.js";
 
 const router = Router();
 
 type VendorOrderItem = {
-  productId: ObjectId | string;
-  status?: string;
-  name?: string;
-  size?: string;
-  image?: string;
-  price?: number;
-  quantity?: number;
-  subtotal?: number;
+  itemId: string;
+  productId: string;
+  vendorId: string;
+  status: OrderStatus;
+  name: string;
+  size: string;
+  image: string;
+  price: number;
+  quantity: number;
+  subtotal: number;
 };
 
-type VendorOrderDocument = {
+type VendorOrderWithItems = {
   _id: ObjectId;
-  status?: string;
+  status: OrderStatus;
   createdAt?: Date;
-  items?: VendorOrderItem[];
-};
-
-type VendorOrderWithItems = Omit<VendorOrderDocument, "items"> & {
+  customerName: string;
+  deliveryAddress: string;
+  phone: string;
+  vendorTotal: number;
   items: VendorOrderItem[];
 };
 
@@ -34,37 +48,234 @@ async function loadVendorOrders(vendorId: string): Promise<VendorOrderWithItems[
     .project({ _id: 1 })
     .toArray();
   const productIds = products.map((product) => product._id);
-  if (productIds.length === 0) return [];
-
   const productIdSet = new Set(productIds.map(String));
-  const orders = await mongoDB
-    .collection<VendorOrderDocument>("orders")
-    .find({ "items.productId": { $in: [...productIds, ...productIds.map(String)] } })
-    .sort({ createdAt: -1 })
-    .toArray();
+  const ordersCollection = mongoDB.collection<OrderRecord>("orders");
+  const [snapshotOrders, legacyOrders] = await Promise.all([
+    ordersCollection
+      .find({ "items.vendorId": vendorId })
+      .sort({ createdAt: -1 })
+      .toArray(),
+    productIds.length
+      ? ordersCollection
+          .find({
+            "items.productId": { $in: [...productIds, ...productIds.map(String)] },
+          })
+          .sort({ createdAt: -1 })
+          .toArray()
+      : Promise.resolve([] as OrderRecord[]),
+  ]);
+  const ordersById = new Map<string, OrderRecord>();
+  for (const order of [...snapshotOrders, ...legacyOrders]) {
+    ordersById.set(String(order._id), order);
+  }
 
-  return orders.flatMap((order) => {
-    const ownItems = Array.isArray(order.items)
-      ? order.items.filter((item) => productIdSet.has(String(item.productId)))
-      : [];
+  return [...ordersById.values()].flatMap((order) => {
+    const ownItems = (Array.isArray(order.items) ? order.items : [])
+      .map((item, index) => ({ item, index }))
+      .filter(
+        ({ item }) =>
+          item.vendorId === vendorId ||
+          (item.vendorId == null && productIdSet.has(String(item.productId))),
+      );
     if (ownItems.length === 0) return [];
+    const orderWithOwnItems = { ...order, items: ownItems.map(({ item }) => item) };
+    const responseItems = ownItems.map(({ item, index }) => ({
+      itemId: String(item.itemId ?? item._id ?? `legacy_${index}`),
+      productId: String(item.productId),
+      vendorId,
+      status: getItemStatus(item, order.status),
+      name: String(item.name ?? ""),
+      size: String(item.size ?? ""),
+      image: String(item.image ?? ""),
+      price: Number(item.price ?? 0),
+      quantity: Number(item.quantity ?? 0),
+      subtotal: Number(
+        item.subtotal ?? Number(item.price ?? 0) * Number(item.quantity ?? 0),
+      ),
+    }));
 
     return [{
       _id: order._id,
-      status: String(order.status ?? "pending"),
+      status: getOrderStatus(orderWithOwnItems),
       createdAt: order.createdAt,
-      items: ownItems.map((item) => ({
-        productId: String(item.productId),
-        status: String(item.status ?? order.status ?? "pending"),
-        name: String(item.name ?? ""),
-        size: String(item.size ?? ""),
-        image: String(item.image ?? ""),
-        price: Number(item.price ?? 0),
-        quantity: Number(item.quantity ?? 0),
-        subtotal: Number(item.subtotal ?? Number(item.price ?? 0) * Number(item.quantity ?? 0)),
-      })),
+      customerName: String(order.customerName ?? ""),
+      deliveryAddress: String(order.deliveryAddress ?? ""),
+      phone: String(order.phone ?? ""),
+      vendorTotal: responseItems.reduce((sum, item) => sum + item.subtotal, 0),
+      items: responseItems,
     }];
-  });
+  }).sort(
+    (left, right) =>
+      (right.createdAt?.getTime() ?? 0) - (left.createdAt?.getTime() ?? 0),
+  );
+}
+
+function updateVendorOrderItem(legacyProductId = false): RequestHandler {
+  return async (req, res) => {
+    const orderId = String(req.params.id);
+    const selector = legacyProductId
+      ? (req.body as { productId?: unknown } | null)?.productId
+      : req.params.itemId;
+    const status = (req.body as { status?: unknown } | null)?.status;
+    if (!ObjectId.isValid(orderId)) {
+      res.status(400).json({ success: false, message: "Invalid order ID." });
+      return;
+    }
+    if (typeof selector !== "string" || !selector) {
+      res.status(400).json({ success: false, message: "Invalid order item ID." });
+      return;
+    }
+    if (legacyProductId && !ObjectId.isValid(selector)) {
+      res.status(400).json({ success: false, message: "Invalid product ID." });
+      return;
+    }
+    if (
+      !legacyProductId &&
+      !/^legacy_\d+$/.test(selector) &&
+      !ObjectId.isValid(selector)
+    ) {
+      res.status(400).json({ success: false, message: "Invalid order item ID." });
+      return;
+    }
+    if (!isOrderStatus(status)) {
+      res.status(400).json({ success: false, message: "Invalid vendor order status." });
+      return;
+    }
+
+    try {
+      const vendorId = req.authUser!.id;
+      const productIds = await mongoDB
+        .collection("products")
+        .find({ vendorId })
+        .project({ _id: 1 })
+        .toArray();
+      const ownedProductIds = new Set(productIds.map((product) => String(product._id)));
+      const orderObjectId = new ObjectId(orderId);
+      const orders = mongoDB.collection<OrderRecord>("orders");
+      const order = await orders.findOne({ _id: orderObjectId });
+      if (!order) {
+        res.status(404).json({ success: false, message: "Order not found." });
+        return;
+      }
+
+      const items = order.items ?? [];
+      const selectedIndex = items.findIndex((item, index) => {
+        const ownsItem =
+          item.vendorId === vendorId ||
+          (item.vendorId == null && ownedProductIds.has(String(item.productId)));
+        if (!ownsItem) return false;
+        if (legacyProductId) return String(item.productId) === selector;
+        return String(item.itemId ?? item._id ?? `legacy_${index}`) === selector;
+      });
+      if (selectedIndex < 0) {
+        res.status(404).json({ success: false, message: "Order item not found in your store." });
+        return;
+      }
+
+      const selectedItem = items[selectedIndex];
+      const currentStatus = getItemStatus(selectedItem, order.status);
+      if (
+        status !== currentStatus &&
+        !vendorStatusTransitions[currentStatus].includes(status)
+      ) {
+        res.status(400).json({
+          success: false,
+          message: `Cannot change this item from ${currentStatus} to ${status}.`,
+        });
+        return;
+      }
+
+      const now = new Date();
+      const itemIdField =
+        selectedItem.itemId !== undefined
+          ? "itemId"
+          : selectedItem._id !== undefined
+            ? "_id"
+            : null;
+      let updateResult;
+      if (itemIdField) {
+        const storedItemId = selectedItem[itemIdField];
+        const itemIds =
+          storedItemId instanceof ObjectId
+            ? [storedItemId, storedItemId.toHexString()]
+            : [storedItemId];
+        updateResult = await orders.updateOne(
+          {
+            _id: orderObjectId,
+            items: {
+              $elemMatch: {
+                [itemIdField]: { $in: itemIds },
+                productId: selectedItem.productId,
+                vendorId: selectedItem.vendorId ?? null,
+              },
+            },
+          },
+          {
+            $set: {
+              "items.$[line].status": status,
+              "items.$[line].vendorId": vendorId,
+              updatedAt: now,
+            },
+          },
+          {
+            arrayFilters: [
+              {
+                [`line.${itemIdField}`]: { $in: itemIds },
+                "line.productId": selectedItem.productId,
+                "line.vendorId": selectedItem.vendorId ?? null,
+              },
+            ],
+          },
+        );
+      } else {
+        const itemPrefix = `items.${selectedIndex}`;
+        const filter: Record<string, unknown> = {
+          _id: orderObjectId,
+          [`${itemPrefix}.productId`]: selectedItem.productId,
+        };
+        filter[`${itemPrefix}.vendorId`] =
+          selectedItem.vendorId === undefined
+            ? { $exists: false }
+            : selectedItem.vendorId;
+        updateResult = await orders.updateOne(
+          filter,
+          {
+            $set: {
+              [`${itemPrefix}.status`]: status,
+              [`${itemPrefix}.vendorId`]: vendorId,
+              updatedAt: now,
+            },
+          },
+        );
+      }
+      if (updateResult.matchedCount === 0) {
+        res.status(409).json({
+          success: false,
+          message: "The order item changed. Refresh and try again.",
+        });
+        return;
+      }
+
+      const refreshedOrder = await orders.findOne({ _id: orderObjectId });
+      if (refreshedOrder) {
+        await orders.updateOne(
+          { _id: orderObjectId },
+          { $set: { status: getOrderStatus(refreshedOrder) } },
+        );
+      }
+
+      const updatedVendorOrder = (await loadVendorOrders(vendorId)).find(
+        (entry) => String(entry._id) === orderId,
+      );
+      res.json({ success: true, data: updatedVendorOrder ?? null });
+    } catch (error) {
+      console.error("Update vendor order item status failed:", error);
+      res.status(500).json({
+        success: false,
+        message: "Could not update order item status.",
+      });
+    }
+  };
 }
 
 router.get(
@@ -263,7 +474,7 @@ router.delete(
 router.get(
   "/orders",
   requireAuth,
-  requireVendor,
+  requireApprovedVendor,
   async (req, res) => {
     try {
       const orders = await loadVendorOrders(req.authUser!.id);
@@ -275,113 +486,48 @@ router.get(
   },
 );
 
+router.get(
+  "/orders/:id",
+  requireAuth,
+  requireApprovedVendor,
+  async (req, res) => {
+    const id = String(req.params.id);
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ success: false, message: "Invalid order ID." });
+    }
+    try {
+      const order = (await loadVendorOrders(req.authUser!.id)).find(
+        (item) => String(item._id) === id,
+      );
+      if (!order) {
+        return res.status(404).json({ success: false, message: "Order not found in your store." });
+      }
+      return res.json({ success: true, data: order });
+    } catch (error) {
+      console.error("Load vendor order failed:", error);
+      return res.status(500).json({ success: false, message: "Could not load order." });
+    }
+  },
+);
+
+router.patch(
+  "/orders/:id/items/:itemId/status",
+  requireAuth,
+  requireApprovedVendor,
+  updateVendorOrderItem(),
+);
+
 router.patch(
   "/orders/:id/status",
   requireAuth,
-  requireVendor,
-  async (req, res) => {
-    try {
-      const orderId = String(req.params.id);
-      const body = req.body as { productId?: unknown; status?: unknown } | null;
-      const productId = body?.productId;
-      const status = body?.status;
-      const allowedStatuses = [
-        "confirmed",
-        "preparing",
-        "out_for_delivery",
-        "delivered",
-        "cancelled",
-      ];
-
-      if (!ObjectId.isValid(orderId) || typeof productId !== "string" || !ObjectId.isValid(productId)) {
-        return res.status(400).json({ success: false, message: "Invalid order or product ID." });
-      }
-      if (typeof status !== "string" || !allowedStatuses.includes(status)) {
-        return res.status(400).json({ success: false, message: "Invalid vendor order status." });
-      }
-
-      const productObjectId = new ObjectId(productId);
-      const product = await mongoDB.collection("products").findOne({
-        _id: productObjectId,
-        vendorId: req.authUser!.id,
-      });
-      if (!product) {
-        return res.status(404).json({ success: false, message: "Product not found in your store." });
-      }
-
-      const orderObjectId = new ObjectId(orderId);
-      const order = await mongoDB.collection<VendorOrderDocument>("orders").findOne({
-        _id: orderObjectId,
-      });
-      if (!order) {
-        return res.status(404).json({ success: false, message: "Order not found." });
-      }
-      if (!order.items?.some((item) => String(item.productId) === productId)) {
-        return res.status(404).json({ success: false, message: "Order item not found." });
-      }
-      const currentItem = order.items.find(
-        (item) => String(item.productId) === productId,
-      );
-      const currentStatus = String(currentItem?.status ?? order.status ?? "pending");
-      const transitions: Record<string, string[]> = {
-        pending: ["confirmed", "cancelled"],
-        confirmed: ["preparing", "cancelled"],
-        preparing: ["out_for_delivery", "cancelled"],
-        out_for_delivery: ["delivered"],
-        delivered: [],
-        cancelled: [],
-      };
-      if (
-        status !== currentStatus &&
-        !transitions[currentStatus]?.includes(status)
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: `Cannot change this item from ${currentStatus} to ${status}.`,
-        });
-      }
-
-      const now = new Date();
-      await mongoDB.collection("orders").updateOne(
-        { _id: orderObjectId },
-        { $set: { "items.$[line].status": status, updatedAt: now } },
-        {
-          arrayFilters: [
-            { "line.productId": { $in: [productObjectId, productId] } },
-          ],
-        },
-      );
-
-      const refreshedOrder = await mongoDB
-        .collection<VendorOrderDocument>("orders")
-        .findOne({ _id: orderObjectId });
-      if (refreshedOrder?.items?.length) {
-        const allItemsHaveSameStatus = refreshedOrder.items.every(
-          (item) => item.status === status,
-        );
-        if (allItemsHaveSameStatus) {
-          await mongoDB.collection("orders").updateOne(
-            { _id: orderObjectId },
-            { $set: { status, updatedAt: now } },
-          );
-        }
-      }
-
-      const updatedVendorOrder = (await loadVendorOrders(req.authUser!.id)).find(
-        (item) => String(item._id) === orderId,
-      );
-      return res.json({ success: true, data: updatedVendorOrder });
-    } catch (error) {
-      console.error("Update vendor order item status failed:", error);
-      return res.status(500).json({ success: false, message: "Could not update order item status." });
-    }
-  },
+  requireApprovedVendor,
+  updateVendorOrderItem(true),
 );
 
 router.get(
   "/sales",
   requireAuth,
-  requireVendor,
+  requireApprovedVendor,
   async (req, res) => {
     try {
       const orders = await loadVendorOrders(req.authUser!.id);

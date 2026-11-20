@@ -4,8 +4,22 @@ import type { RequestHandler } from "express";
 import { ObjectId, type Filter } from "mongodb";
 import { mongoClient, mongoDB } from "../config/db.js";
 import { requireAdmin, requireAuth } from "../middleware/auth.js";
+import {
+  getAdminOrder,
+  listAdminOrders,
+  updateAdminOrderStatus,
+} from "../controllers/admin-orders.js";
 
 const router = Router();
+
+router.get("/orders", requireAuth, requireAdmin, listAdminOrders);
+router.get("/orders/:id", requireAuth, requireAdmin, getAdminOrder);
+router.patch(
+  "/orders/:id/status",
+  requireAuth,
+  requireAdmin,
+  updateAdminOrderStatus,
+);
 
 type AuthUserDocument = {
   _id: string | ObjectId;
@@ -158,6 +172,26 @@ function reviewApplication(status: "approved" | "rejected"): RequestHandler {
   };
 }
 
+async function resolveProductVendorId(value: unknown): Promise<string | null> {
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new AdminRouteError(400, "Vendor must be an approved vendor account.");
+  }
+
+  const vendorId = value.trim();
+  const vendor = await mongoDB.collection<AuthUserDocument>("user").findOne({
+    $and: [
+      authUserFilter(vendorId),
+      { role: "vendor", vendorStatus: "approved" },
+      { $or: [{ status: "active" }, { status: { $exists: false } }] },
+    ],
+  });
+  if (!vendor) {
+    throw new AdminRouteError(400, "Vendor must be an approved vendor account.");
+  }
+  return String(vendor.id ?? vendor._id);
+}
+
 // GET: View all products
 router.get("/products", requireAuth, requireAdmin, async (_req, res) => {
   try {
@@ -176,11 +210,39 @@ router.get("/products", requireAuth, requireAdmin, async (_req, res) => {
   }
 });
 
+router.get("/vendors/approved", requireAuth, requireAdmin, async (_req, res) => {
+  try {
+    const vendors = await mongoDB
+      .collection<AuthUserDocument>("user")
+      .find({
+        role: "vendor",
+        vendorStatus: "approved",
+        $or: [{ status: "active" }, { status: { $exists: false } }],
+      })
+      .project({ _id: 1, id: 1, name: 1 })
+      .sort({ name: 1 })
+      .toArray();
+    res.json({
+      success: true,
+      data: vendors.map((vendor) => ({
+        id: String(vendor.id ?? vendor._id),
+        name: String(vendor.name ?? ""),
+      })),
+    });
+  } catch (error) {
+    console.error("Load approved product vendors failed:", error);
+    res.status(500).json({
+      success: false,
+      message: "Could not load approved vendors.",
+    });
+  }
+});
+
 // POST: Add a new product
 router.post("/products", requireAuth, requireAdmin, async (req, res) => {
   try {
     const body = req.body as Record<string, unknown> | null;
-    const { name, slug, description, category, price, image } =
+    const { name, slug, description, category, price, image, vendorId } =
       body ?? {};
 
     if (
@@ -210,6 +272,7 @@ router.post("/products", requireAuth, requireAdmin, async (req, res) => {
       });
     }
 
+    const productVendorId = await resolveProductVendorId(vendorId);
     const product = {
       name: (name as string).trim(),
       slug: productSlug,
@@ -218,7 +281,7 @@ router.post("/products", requireAuth, requireAdmin, async (req, res) => {
       price,
       image: (image as string).trim(),
       sizes: ["Regular", "Large"],
-      vendorId: null,
+      vendorId: productVendorId,
       isAvailable: true,
       isFeatured: false,
       rating: 4.8,
@@ -232,7 +295,14 @@ router.post("/products", requireAuth, requireAdmin, async (req, res) => {
       success: true,
       data: { ...product, _id: result.insertedId },
     });
-  } catch {
+  } catch (error) {
+    if (error instanceof AdminRouteError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        message: error.message,
+      });
+    }
+    console.error("Create admin product failed:", error);
     res.status(500).json({
       success: false,
       message: "Could not create product.",
@@ -265,6 +335,7 @@ router.put(
         image,
         isAvailable,
         isFeatured,
+        vendorId,
       } = (req.body as Record<string, unknown> | null) ?? {};
 
       if (
@@ -301,6 +372,9 @@ router.put(
       if (image !== undefined) updateData.image = (image as string).trim();
       if (isAvailable !== undefined) updateData.isAvailable = isAvailable;
       if (isFeatured !== undefined) updateData.isFeatured = isFeatured;
+      if (vendorId !== undefined) {
+        updateData.vendorId = await resolveProductVendorId(vendorId);
+      }
 
       if (Object.keys(updateData).length === 0) {
         return res.status(400).json({
@@ -352,7 +426,14 @@ router.put(
         message: "Product updated successfully.",
         data: updatedProduct,
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof AdminRouteError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          message: error.message,
+        });
+      }
+      console.error("Update admin product failed:", error);
       res.status(500).json({
         success: false,
         message: "Could not update product.",

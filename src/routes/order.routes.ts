@@ -7,6 +7,16 @@ import {
   requireAuth,
   requireCustomer,
 } from "../middleware/auth.js";
+import {
+  getItemStatus,
+  getOrderStatus,
+  normalizeOrder,
+  type OrderRecord,
+} from "../lib/order-management.js";
+import {
+  listAdminOrders,
+  updateAdminOrderStatus,
+} from "../controllers/admin-orders.js";
 
 const router = Router();
 
@@ -89,8 +99,19 @@ router.post("/", requireAuth, requireCustomer, async (req, res) => {
           message: `${product.name} is not available in ${item.size} size.`,
         });
       }
+      if (
+        typeof product.price !== "number" ||
+        !Number.isFinite(product.price) ||
+        product.price <= 0
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: `${product.name} has an invalid price.`,
+        });
+      }
 
       orderItems.push({
+        itemId: new ObjectId(),
         productId: product._id,
         vendorId: typeof product.vendorId === "string" ? product.vendorId : null,
         name: product.name,
@@ -233,7 +254,7 @@ router.post(
         if (
           typeof product.price !== "number" ||
           !Number.isFinite(product.price) ||
-          product.price < 0
+          product.price <= 0
         ) {
           return res.status(400).json({
             success: false,
@@ -242,6 +263,7 @@ router.post(
         }
 
         orderItems.push({
+          itemId: new ObjectId(),
           productId: product._id,
           vendorId: typeof product.vendorId === "string" ? product.vendorId : null,
           name: product.name,
@@ -315,13 +337,14 @@ router.post(
 router.get("/my", requireAuth, requireCustomer, async (req, res) => {
   try {
     const orders = await mongoDB
-      .collection("orders")
+      .collection<OrderRecord>("orders")
       .find({ userId: req.authUser!.id })
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.json({ success: true, data: orders });
-  } catch {
+    res.json({ success: true, data: orders.map(normalizeOrder) });
+  } catch (error) {
+    console.error("Load customer orders failed:", error);
     res.status(500).json({
       success: false,
       message: "Could not load your orders.",
@@ -329,90 +352,90 @@ router.get("/my", requireAuth, requireCustomer, async (req, res) => {
   }
 });
 
-// Admin: Get all orders
-router.get("/admin/all", requireAuth, requireAdmin, async (_req, res) => {
+router.get("/:id", requireAuth, requireCustomer, async (req, res) => {
+  const id = String(req.params.id);
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, message: "Invalid order ID." });
+  }
   try {
-    const orders = await mongoDB
-      .collection("orders")
-      .find({})
-      .sort({ createdAt: -1 })
-      .toArray();
-
-    res.json({ success: true, data: orders });
-  } catch {
-    res.status(500).json({
-      success: false,
-      message: "Could not load orders.",
+    const order = await mongoDB.collection<OrderRecord>("orders").findOne({
+      _id: new ObjectId(id),
+      userId: req.authUser!.id,
     });
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found." });
+    }
+    return res.json({ success: true, data: normalizeOrder(order) });
+  } catch (error) {
+    console.error("Load customer order failed:", error);
+    return res.status(500).json({ success: false, message: "Could not load order." });
   }
 });
+
+router.patch("/:id/cancel", requireAuth, requireCustomer, async (req, res) => {
+  const id = String(req.params.id);
+  if (!ObjectId.isValid(id)) {
+    return res.status(400).json({ success: false, message: "Invalid order ID." });
+  }
+  try {
+    const orderId = new ObjectId(id);
+    const orders = mongoDB.collection<OrderRecord>("orders");
+    const order = await orders.findOne({
+      _id: orderId,
+      userId: req.authUser!.id,
+    });
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found." });
+    }
+    const items = order.items ?? [];
+    if (
+      getOrderStatus(order) !== "pending" ||
+      items.some((item) => getItemStatus(item, order.status) !== "pending")
+    ) {
+      return res.status(409).json({
+        success: false,
+        message: "This order can no longer be cancelled.",
+      });
+    }
+
+    const filter: Record<string, unknown> = {
+      _id: orderId,
+      userId: req.authUser!.id,
+    };
+    if (order.updatedAt) filter.updatedAt = order.updatedAt;
+    if (items.length) filter.items = items;
+    const update: Record<string, unknown> = {
+      status: "cancelled",
+      updatedAt: new Date(),
+    };
+    if (items.length) update["items.$[].status"] = "cancelled";
+    const result = await orders.updateOne(filter, { $set: update });
+    if (result.matchedCount === 0) {
+      return res.status(409).json({
+        success: false,
+        message: "The order changed before cancellation. Refresh and try again.",
+      });
+    }
+    const updated = await orders.findOne({ _id: orderId });
+    if (!updated) {
+      return res.status(404).json({ success: false, message: "Order not found." });
+    }
+    return res.json({ success: true, data: normalizeOrder(updated) });
+  } catch (error) {
+    console.error("Cancel customer order failed:", error);
+    return res.status(500).json({ success: false, message: "Could not cancel order." });
+  }
+});
+
+// Admin: Get all orders
+router.get("/admin/all", requireAuth, requireAdmin, listAdminOrders);
 
 // Admin: Update order status
 router.patch(
   "/admin/:id/status",
   requireAuth,
   requireAdmin,
-  async (req, res) => {
-    try {
-    const id = String(req.params.id);
-      const status = (req.body as { status?: unknown } | null)?.status;
-
-      const allowedStatuses = [
-        "pending",
-        "confirmed",
-        "preparing",
-        "out_for_delivery",
-        "delivered",
-        "cancelled",
-      ];
-
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid order ID.",
-        });
-      }
-
-      if (typeof status !== "string" || !allowedStatuses.includes(status)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid order status.",
-        });
-      }
-
-      const result = await mongoDB.collection("orders").updateOne(
-        { _id: new ObjectId(id) },
-        {
-          $set: {
-            status,
-            "items.$[].status": status,
-            updatedAt: new Date(),
-          },
-        }
-      );
-
-      if (result.matchedCount === 0) {
-        return res.status(404).json({
-          success: false,
-          message: "Order not found.",
-        });
-      }
-
-      const order = await mongoDB.collection("orders").findOne({
-        _id: new ObjectId(id),
-      });
-      res.json({
-        success: true,
-        message: "Order status updated successfully.",
-        data: order,
-      });
-    } catch {
-      res.status(500).json({
-        success: false,
-        message: "Could not update order status.",
-      });
-    }
-  }
+  updateAdminOrderStatus,
 );
 
 // Admin: Delete an order

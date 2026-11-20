@@ -115,3 +115,17 @@ export function requireVendor(req: Request, res: Response, next: NextFunction) {
   }
   return next();
 }
+
+export function requireApprovedVendor(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+) {
+  if (!req.authUser || req.authUser.role !== "vendor") {
+    return res.status(403).json({ success: false, message: "Vendor access is required." });
+  }
+  if (req.authUser.vendorStatus !== "approved") {
+    return res.status(403).json({ success: false, message: "Your vendor account is not approved." });
+  }
+  return next();
+}
