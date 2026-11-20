@@ -76,8 +76,7 @@ function reviewApplication(status: "approved" | "rejected"): RequestHandler {
             ? await users.updateOne(
                 {
                   ...userFilter,
-                role: "customer",
-                  vendorStatus: { $in: ["pending", null] },
+                  role: "customer",
                 },
                 {
                   $set: {
@@ -734,7 +733,7 @@ router.get(
         mongoDB.collection("user").countDocuments(),
         mongoDB.collection("user").countDocuments({ role: "customer" }),
         mongoDB.collection("user").countDocuments({ role: "vendor" }),
-        mongoDB.collection("user").countDocuments({ vendorStatus: "pending" }),
+        mongoDB.collection("vendor_applications").countDocuments({ status: "pending" }),
         mongoDB.collection("products").countDocuments(),
         mongoDB
           .collection("orders")

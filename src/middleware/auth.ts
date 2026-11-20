@@ -103,6 +103,10 @@ export const requireAdmin = allowRoles("admin");
 export const requireCustomer = allowRoles("customer");
 
 export function requireVendor(req: Request, res: Response, next: NextFunction) {
+  if (req.authUser?.role === "admin") {
+    // Admins may use vendor-scoped APIs, which still restrict records to their own vendor ID.
+    return next();
+  }
   if (!req.authUser || req.authUser.role !== "vendor") {
     return res.status(403).json({ success: false, message: "Vendor access is required." });
   }
