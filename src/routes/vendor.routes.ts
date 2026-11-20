@@ -1,14 +1,19 @@
 import { Router } from "express";
 import { ObjectId } from "mongodb";
 import { mongoDB } from "../config/db.js";
-import { allowRoles, requireAuth } from "../middleware/auth.js";
+import { requireAuth, requireVendor } from "../middleware/auth.js";
 
 const router = Router();
 
 type VendorOrderItem = {
   productId: ObjectId | string;
+  status?: string;
+  name?: string;
+  size?: string;
+  image?: string;
   price?: number;
   quantity?: number;
+  subtotal?: number;
 };
 
 type VendorOrderDocument = {
@@ -16,7 +21,6 @@ type VendorOrderDocument = {
   status?: string;
   createdAt?: Date;
   items?: VendorOrderItem[];
-  [key: string]: unknown;
 };
 
 type VendorOrderWithItems = Omit<VendorOrderDocument, "items"> & {
@@ -35,22 +39,38 @@ async function loadVendorOrders(vendorId: string): Promise<VendorOrderWithItems[
   const productIdSet = new Set(productIds.map(String));
   const orders = await mongoDB
     .collection<VendorOrderDocument>("orders")
-    .find({ "items.productId": { $in: productIds } })
+    .find({ "items.productId": { $in: [...productIds, ...productIds.map(String)] } })
     .sort({ createdAt: -1 })
     .toArray();
 
   return orders.flatMap((order) => {
-    const items = Array.isArray(order.items)
+    const ownItems = Array.isArray(order.items)
       ? order.items.filter((item) => productIdSet.has(String(item.productId)))
       : [];
-    return items.length > 0 ? [{ ...order, items }] : [];
+    if (ownItems.length === 0) return [];
+
+    return [{
+      _id: order._id,
+      status: String(order.status ?? "pending"),
+      createdAt: order.createdAt,
+      items: ownItems.map((item) => ({
+        productId: String(item.productId),
+        status: String(item.status ?? order.status ?? "pending"),
+        name: String(item.name ?? ""),
+        size: String(item.size ?? ""),
+        image: String(item.image ?? ""),
+        price: Number(item.price ?? 0),
+        quantity: Number(item.quantity ?? 0),
+        subtotal: Number(item.subtotal ?? Number(item.price ?? 0) * Number(item.quantity ?? 0)),
+      })),
+    }];
   });
 }
 
 router.get(
   "/products",
   requireAuth,
-  allowRoles("vendor"),
+  requireVendor,
   async (req, res) => {
     try {
       const products = await mongoDB
@@ -69,11 +89,12 @@ router.get(
 router.post(
   "/products",
   requireAuth,
-  allowRoles("vendor"),
+  requireVendor,
   async (req, res) => {
     try {
+      const body = req.body as Record<string, unknown> | null;
       const { name, slug, description, category, price, image } =
-        req.body as Record<string, unknown>;
+        body ?? {};
       if (
         ![name, slug, description, category, image].every(
           (value) => typeof value === "string" && value.trim(),
@@ -129,7 +150,7 @@ router.post(
 router.put(
   "/products/:id",
   requireAuth,
-  allowRoles("vendor"),
+  requireVendor,
   async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -137,8 +158,9 @@ router.put(
         return res.status(400).json({ success: false, message: "Invalid product ID." });
       }
 
+      const body = req.body as Record<string, unknown> | null;
       const { name, slug, description, category, price, image, isAvailable } =
-        req.body as Record<string, unknown>;
+        body ?? {};
       if (
         (name !== undefined && (typeof name !== "string" || !name.trim())) ||
         (slug !== undefined && (typeof slug !== "string" || !slug.trim())) ||
@@ -213,7 +235,7 @@ router.put(
 router.delete(
   "/products/:id",
   requireAuth,
-  allowRoles("vendor"),
+  requireVendor,
   async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -241,7 +263,7 @@ router.delete(
 router.get(
   "/orders",
   requireAuth,
-  allowRoles("vendor"),
+  requireVendor,
   async (req, res) => {
     try {
       const orders = await loadVendorOrders(req.authUser!.id);
@@ -253,10 +275,113 @@ router.get(
   },
 );
 
+router.patch(
+  "/orders/:id/status",
+  requireAuth,
+  requireVendor,
+  async (req, res) => {
+    try {
+      const orderId = String(req.params.id);
+      const body = req.body as { productId?: unknown; status?: unknown } | null;
+      const productId = body?.productId;
+      const status = body?.status;
+      const allowedStatuses = [
+        "confirmed",
+        "preparing",
+        "out_for_delivery",
+        "delivered",
+        "cancelled",
+      ];
+
+      if (!ObjectId.isValid(orderId) || typeof productId !== "string" || !ObjectId.isValid(productId)) {
+        return res.status(400).json({ success: false, message: "Invalid order or product ID." });
+      }
+      if (typeof status !== "string" || !allowedStatuses.includes(status)) {
+        return res.status(400).json({ success: false, message: "Invalid vendor order status." });
+      }
+
+      const productObjectId = new ObjectId(productId);
+      const product = await mongoDB.collection("products").findOne({
+        _id: productObjectId,
+        vendorId: req.authUser!.id,
+      });
+      if (!product) {
+        return res.status(404).json({ success: false, message: "Product not found in your store." });
+      }
+
+      const orderObjectId = new ObjectId(orderId);
+      const order = await mongoDB.collection<VendorOrderDocument>("orders").findOne({
+        _id: orderObjectId,
+      });
+      if (!order) {
+        return res.status(404).json({ success: false, message: "Order not found." });
+      }
+      if (!order.items?.some((item) => String(item.productId) === productId)) {
+        return res.status(404).json({ success: false, message: "Order item not found." });
+      }
+      const currentItem = order.items.find(
+        (item) => String(item.productId) === productId,
+      );
+      const currentStatus = String(currentItem?.status ?? order.status ?? "pending");
+      const transitions: Record<string, string[]> = {
+        pending: ["confirmed", "cancelled"],
+        confirmed: ["preparing", "cancelled"],
+        preparing: ["out_for_delivery", "cancelled"],
+        out_for_delivery: ["delivered"],
+        delivered: [],
+        cancelled: [],
+      };
+      if (
+        status !== currentStatus &&
+        !transitions[currentStatus]?.includes(status)
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: `Cannot change this item from ${currentStatus} to ${status}.`,
+        });
+      }
+
+      const now = new Date();
+      await mongoDB.collection("orders").updateOne(
+        { _id: orderObjectId },
+        { $set: { "items.$[line].status": status, updatedAt: now } },
+        {
+          arrayFilters: [
+            { "line.productId": { $in: [productObjectId, productId] } },
+          ],
+        },
+      );
+
+      const refreshedOrder = await mongoDB
+        .collection<VendorOrderDocument>("orders")
+        .findOne({ _id: orderObjectId });
+      if (refreshedOrder?.items?.length) {
+        const allItemsHaveSameStatus = refreshedOrder.items.every(
+          (item) => item.status === status,
+        );
+        if (allItemsHaveSameStatus) {
+          await mongoDB.collection("orders").updateOne(
+            { _id: orderObjectId },
+            { $set: { status, updatedAt: now } },
+          );
+        }
+      }
+
+      const updatedVendorOrder = (await loadVendorOrders(req.authUser!.id)).find(
+        (item) => String(item._id) === orderId,
+      );
+      return res.json({ success: true, data: updatedVendorOrder });
+    } catch (error) {
+      console.error("Update vendor order item status failed:", error);
+      return res.status(500).json({ success: false, message: "Could not update order item status." });
+    }
+  },
+);
+
 router.get(
   "/sales",
   requireAuth,
-  allowRoles("vendor"),
+  requireVendor,
   async (req, res) => {
     try {
       const orders = await loadVendorOrders(req.authUser!.id);
@@ -303,7 +428,7 @@ router.get(
 router.get(
   "/store",
   requireAuth,
-  allowRoles("vendor"),
+  requireVendor,
   async (req, res) => {
     try {
       const store = await mongoDB.collection("stores").findOne({
@@ -328,13 +453,11 @@ router.get(
 router.put(
   "/store",
   requireAuth,
-  allowRoles("vendor"),
+  requireVendor,
   async (req, res) => {
     try {
-      const { storeName, description, phone, address } = req.body as Record<
-        string,
-        unknown
-      >;
+      const body = req.body as Record<string, unknown> | null;
+      const { storeName, description, phone, address } = body ?? {};
       if (
         typeof storeName !== "string" ||
         !storeName.trim() ||

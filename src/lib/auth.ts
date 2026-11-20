@@ -26,6 +26,28 @@ export const auth = betterAuth({
         defaultValue: "customer",
         input: false,
       },
+      vendorStatus: {
+        type: "string",
+        required: false,
+        defaultValue: "not_applied",
+        input: false,
+      },
+      vendorAppliedAt: {
+        type: "date",
+        required: false,
+        input: false,
+      },
+      vendorApprovedAt: {
+        type: "date",
+        required: false,
+        input: false,
+      },
+      status: {
+        type: "string",
+        required: false,
+        defaultValue: "active",
+        input: false,
+      },
     },
   },
   plugins: [jwt()],

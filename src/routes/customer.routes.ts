@@ -2,6 +2,7 @@ import { Router } from "express";
 import { ObjectId } from "mongodb";
 import { mongoDB } from "../config/db.js";
 import { allowRoles, requireAuth } from "../middleware/auth.js";
+import { applyVendorApplication } from "../controllers/vendor-applications.js";
 
 const router = Router();
 
@@ -135,10 +136,8 @@ router.put(
   allowRoles("customer"),
   async (req, res) => {
     try {
-      const { fullName, phone, street, city, postalCode } = req.body as Record<
-        string,
-        unknown
-      >;
+      const body = req.body as Record<string, unknown> | null;
+      const { fullName, phone, street, city, postalCode } = body ?? {};
       if (
         ![fullName, phone, street, city, postalCode].every(
           (value) => typeof value === "string" && value.trim(),
@@ -193,52 +192,7 @@ router.post(
   "/vendor-application",
   requireAuth,
   allowRoles("customer"),
-  async (req, res) => {
-    try {
-      const { storeName, description } = req.body as {
-        storeName?: unknown;
-        description?: unknown;
-      };
-      if (
-        typeof storeName !== "string" ||
-        !storeName.trim() ||
-        typeof description !== "string" ||
-        !description.trim()
-      ) {
-        return res.status(400).json({
-          success: false,
-          message: "Store name and a short description are required.",
-        });
-      }
-
-      const now = new Date();
-      await mongoDB.collection("vendor_applications").updateOne(
-        { userId: req.authUser!.id },
-        {
-          $set: {
-            storeName: storeName.trim(),
-            description: description.trim(),
-            status: "pending",
-            updatedAt: now,
-          },
-          $setOnInsert: {
-            userId: req.authUser!.id,
-            applicantName: req.authUser!.name,
-            applicantEmail: req.authUser!.email,
-            createdAt: now,
-          },
-        },
-        { upsert: true },
-      );
-      const application = await mongoDB.collection("vendor_applications").findOne({
-        userId: req.authUser!.id,
-      });
-      res.status(201).json({ success: true, data: application });
-    } catch (error) {
-      console.error("Submit vendor application failed:", error);
-      res.status(500).json({ success: false, message: "Could not submit vendor application." });
-    }
-  },
+  applyVendorApplication,
 );
 
 export default router;

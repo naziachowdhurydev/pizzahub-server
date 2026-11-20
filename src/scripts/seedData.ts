@@ -41,6 +41,7 @@ const products = [
   allergens: ["Wheat (gluten)", "Milk"],
   preparationTime: "20–25 minutes",
   sizes: ["Regular", "Large"],
+  vendorId: null,
   isAvailable: true,
   createdAt: new Date(),
   updatedAt: new Date(),

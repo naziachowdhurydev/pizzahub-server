@@ -6,6 +6,7 @@ import adminRoutes from "./admin.routes.js";
 import customerRoutes from "./customer.routes.js";
 import vendorRoutes from "./vendor.routes.js";
 import cartRoutes from "./cart.route.js";
+import publicVendorRoutes from "./vendors.routes.js";
 
 const router = Router();
 router.use("/", catalogRoutes);
@@ -14,5 +15,6 @@ router.use("/orders", orderRoutes);
 router.use("/cart", cartRoutes);
 router.use("/customer", customerRoutes);
 router.use("/vendor", vendorRoutes);
+router.use("/vendors", publicVendorRoutes);
 router.use("/admin", adminRoutes);
 export default router;

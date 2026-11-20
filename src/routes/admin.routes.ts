@@ -1,8 +1,9 @@
 
 import { Router } from "express";
+import type { RequestHandler } from "express";
 import { ObjectId, type Filter } from "mongodb";
-import { mongoDB } from "../config/db.js";
-import { requireAuth, allowRoles } from "../middleware/auth.js";
+import { mongoClient, mongoDB } from "../config/db.js";
+import { requireAdmin, requireAuth } from "../middleware/auth.js";
 
 const router = Router();
 
@@ -13,9 +14,22 @@ type AuthUserDocument = {
   email?: string;
   image?: string | null;
   role?: string;
+  vendorStatus?: string | null;
+  vendorAppliedAt?: Date;
+  vendorApprovedAt?: Date;
+  status?: string;
   createdAt?: Date;
   updatedAt?: Date;
 };
+
+class AdminRouteError extends Error {
+  constructor(
+    readonly statusCode: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 function authUserFilter(id: string): Filter<AuthUserDocument> {
   const clauses: Filter<AuthUserDocument>[] = [{ _id: id }, { id }];
@@ -23,8 +37,130 @@ function authUserFilter(id: string): Filter<AuthUserDocument> {
   return { $or: clauses };
 }
 
+function reviewApplication(status: "approved" | "rejected"): RequestHandler {
+  return async (req, res) => {
+    const id = String(req.params.id);
+    if (!ObjectId.isValid(id)) {
+      res.status(400).json({ success: false, message: "Invalid application ID." });
+      return;
+    }
+
+    const session = mongoClient.startSession();
+    let updatedApplication: Record<string, unknown> | null = null;
+    try {
+      await session.withTransaction(async () => {
+        const applicationId = new ObjectId(id);
+        const applications = mongoDB.collection("vendor_applications");
+        const application = await applications.findOne(
+          { _id: applicationId, status: "pending" },
+          { session },
+        );
+        if (!application) {
+          throw new AdminRouteError(404, "Pending vendor application not found.");
+        }
+
+        const applicantId = String(application.userId ?? "");
+        const userFilter = authUserFilter(applicantId);
+        const users = mongoDB.collection<AuthUserDocument>("user");
+        const applicant = await users.findOne(userFilter, { session });
+        if (!applicant) {
+          throw new AdminRouteError(404, "Applicant account not found.");
+        }
+        if (status === "approved" && applicant.role !== "customer") {
+          throw new AdminRouteError(409, "Applicant is no longer a customer.");
+        }
+
+        const now = new Date();
+        const userUpdate =
+          status === "approved"
+            ? await users.updateOne(
+                {
+                  ...userFilter,
+                role: "customer",
+                  vendorStatus: { $in: ["pending", null] },
+                },
+                {
+                  $set: {
+                    role: "vendor",
+                    vendorStatus: "approved",
+                    vendorApprovedAt: now,
+                    updatedAt: now,
+                  },
+                },
+                { session },
+              )
+            : await users.updateOne(
+                userFilter,
+                {
+                  $set: {
+                    vendorStatus: "rejected",
+                    updatedAt: now,
+                  },
+                  $unset: { vendorApprovedAt: "" },
+                },
+                { session },
+              );
+        if (userUpdate.matchedCount === 0) {
+          throw new AdminRouteError(409, "Applicant has no pending application.");
+        }
+
+        if (status === "approved") {
+          await mongoDB.collection("stores").updateOne(
+            { ownerId: applicantId },
+            {
+              $setOnInsert: {
+                ownerId: applicantId,
+                storeName: String(application.storeName),
+                description: String(application.description),
+                phone: "",
+                address: "",
+                createdAt: now,
+              },
+            },
+            { upsert: true, session },
+          );
+        }
+
+        const applicationUpdate = await applications.updateOne(
+          { _id: applicationId, status: "pending" },
+          {
+            $set: {
+              status,
+              reviewedBy: req.authUser!.id,
+              reviewedAt: now,
+              updatedAt: now,
+            },
+          },
+          { session },
+        );
+        if (applicationUpdate.matchedCount === 0) {
+          throw new AdminRouteError(409, "Application was already reviewed.");
+        }
+        updatedApplication = await applications.findOne(
+          { _id: applicationId },
+          { session },
+        );
+      });
+
+      res.json({ success: true, data: updatedApplication });
+    } catch (error) {
+      if (error instanceof AdminRouteError) {
+        res.status(error.statusCode).json({ success: false, message: error.message });
+        return;
+      }
+      console.error("Review vendor application failed:", error);
+      res.status(500).json({
+        success: false,
+        message: "Could not review vendor application.",
+      });
+    } finally {
+      await session.endSession();
+    }
+  };
+}
+
 // GET: View all products
-router.get("/products", requireAuth, allowRoles("admin"), async (_req, res) => {
+router.get("/products", requireAuth, requireAdmin, async (_req, res) => {
   try {
     const products = await mongoDB
       .collection("products")
@@ -42,10 +178,11 @@ router.get("/products", requireAuth, allowRoles("admin"), async (_req, res) => {
 });
 
 // POST: Add a new product
-router.post("/products", requireAuth, allowRoles("admin"), async (req, res) => {
+router.post("/products", requireAuth, requireAdmin, async (req, res) => {
   try {
+    const body = req.body as Record<string, unknown> | null;
     const { name, slug, description, category, price, image } =
-      req.body as Record<string, unknown>;
+      body ?? {};
 
     if (
       ![name, slug, description, category, image].every(
@@ -82,6 +219,7 @@ router.post("/products", requireAuth, allowRoles("admin"), async (req, res) => {
       price,
       image: (image as string).trim(),
       sizes: ["Regular", "Large"],
+      vendorId: null,
       isAvailable: true,
       isFeatured: false,
       rating: 4.8,
@@ -107,7 +245,7 @@ router.post("/products", requireAuth, allowRoles("admin"), async (req, res) => {
 router.put(
   "/products/:id",
   requireAuth,
-  allowRoles("admin"),
+  requireAdmin,
   async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -128,7 +266,7 @@ router.put(
         image,
         isAvailable,
         isFeatured,
-      } = req.body as Record<string, unknown>;
+      } = (req.body as Record<string, unknown> | null) ?? {};
 
       if (
         (name !== undefined &&
@@ -228,7 +366,7 @@ router.put(
 router.delete(
   "/products/:id",
   requireAuth,
-  allowRoles("admin"),
+  requireAdmin,
   async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -265,7 +403,7 @@ router.delete(
 );
 
 // GET: View all users
-router.get("/users", requireAuth, allowRoles("admin"), async (_req, res) => {
+router.get("/users", requireAuth, requireAdmin, async (_req, res) => {
   try {
     const users = await mongoDB
       .collection("user")
@@ -277,6 +415,10 @@ router.get("/users", requireAuth, allowRoles("admin"), async (_req, res) => {
             email: 1,
             image: 1,
             role: 1,
+            vendorStatus: 1,
+            vendorAppliedAt: 1,
+            vendorApprovedAt: 1,
+            status: 1,
             createdAt: 1,
             id: 1,
           },
@@ -293,10 +435,41 @@ router.get("/users", requireAuth, allowRoles("admin"), async (_req, res) => {
   }
 });
 
+router.get("/users/:id", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const user = await mongoDB.collection<AuthUserDocument>("user").findOne(
+      authUserFilter(String(req.params.id)),
+      {
+        projection: {
+          _id: 1,
+          id: 1,
+          name: 1,
+          email: 1,
+          image: 1,
+          role: 1,
+          vendorStatus: 1,
+          vendorAppliedAt: 1,
+          vendorApprovedAt: 1,
+          status: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      },
+    );
+    if (!user) {
+      return res.status(404).json({ success: false, message: "User not found." });
+    }
+    return res.json({ success: true, data: user });
+  } catch (error) {
+    console.error("Load admin user failed:", error);
+    return res.status(500).json({ success: false, message: "Could not load user." });
+  }
+});
+
 router.get(
   "/users/:id/details",
   requireAuth,
-  allowRoles("admin"),
+  requireAdmin,
   async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -309,6 +482,10 @@ router.get(
           email: 1,
           image: 1,
           role: 1,
+          vendorStatus: 1,
+          vendorAppliedAt: 1,
+          vendorApprovedAt: 1,
+          status: 1,
           createdAt: 1,
           updatedAt: 1,
         },
@@ -358,11 +535,11 @@ router.get(
 router.patch(
   "/users/:id/role",
   requireAuth,
-  allowRoles("admin"),
+  requireAdmin,
   async (req, res) => {
     try {
       const id = String(req.params.id);
-      const { role } = req.body as { role?: unknown };
+      const role = (req.body as { role?: unknown } | null)?.role;
       if (
         typeof role !== "string" ||
         !["customer", "vendor", "admin"].includes(role)
@@ -372,24 +549,49 @@ router.patch(
           message: "Role must be customer, vendor or admin.",
         });
       }
-      if (id === req.authUser!.id) {
-        return res.status(400).json({
+      const userFilter = authUserFilter(id);
+      const target = await mongoDB.collection<AuthUserDocument>("user").findOne(userFilter);
+      if (!target) {
+        return res.status(404).json({ success: false, message: "User not found." });
+      }
+      if (String(target.id ?? target._id) === req.authUser!.id) {
+        return res.status(400).json({ success: false, message: "You cannot change your own role." });
+      }
+      if (role === "vendor" && target.vendorStatus !== "approved") {
+        return res.status(409).json({
           success: false,
-          message: "You cannot change your own role.",
+          message: "Only an approved vendor application can receive the vendor role.",
         });
       }
 
-      const userFilter = authUserFilter(id);
       const result = await mongoDB.collection<AuthUserDocument>("user").updateOne(
         userFilter,
-        { $set: { role, updatedAt: new Date() } },
+        {
+          $set: {
+            role,
+            ...(role === "customer" && target.role === "vendor"
+              ? { vendorStatus: "not_applied" }
+              : {}),
+            updatedAt: new Date(),
+          },
+        },
       );
       if (result.matchedCount === 0) {
         return res.status(404).json({ success: false, message: "User not found." });
       }
 
       const user = await mongoDB.collection<AuthUserDocument>("user").findOne(userFilter, {
-        projection: { name: 1, email: 1, image: 1, role: 1, createdAt: 1, id: 1 },
+        projection: {
+          _id: 1,
+          name: 1,
+          email: 1,
+          image: 1,
+          role: 1,
+          vendorStatus: 1,
+          status: 1,
+          createdAt: 1,
+          id: 1,
+        },
       });
       res.json({ success: true, data: user });
     } catch (error) {
@@ -399,10 +601,79 @@ router.patch(
   },
 );
 
+router.patch(
+  "/users/:id/status",
+  requireAuth,
+  requireAdmin,
+  async (req, res) => {
+    try {
+      const id = String(req.params.id);
+      const status = (req.body as { status?: unknown } | null)?.status;
+      if (status !== "active" && status !== "suspended") {
+        return res.status(400).json({
+          success: false,
+          message: "Status must be active or suspended.",
+        });
+      }
+
+      const userFilter = authUserFilter(id);
+      const target = await mongoDB.collection<AuthUserDocument>("user").findOne(userFilter);
+      if (!target) {
+        return res.status(404).json({ success: false, message: "User not found." });
+      }
+      if (String(target.id ?? target._id) === req.authUser!.id) {
+        return res.status(400).json({ success: false, message: "You cannot change your own account status." });
+      }
+
+      await mongoDB.collection<AuthUserDocument>("user").updateOne(
+        userFilter,
+        { $set: { status, updatedAt: new Date() } },
+      );
+      const user = await mongoDB.collection<AuthUserDocument>("user").findOne(
+        userFilter,
+        {
+          projection: {
+            _id: 1,
+            id: 1,
+            name: 1,
+            email: 1,
+            role: 1,
+            vendorStatus: 1,
+            status: 1,
+          },
+        },
+      );
+      return res.json({ success: true, data: user });
+    } catch (error) {
+      console.error("Update user status failed:", error);
+      return res.status(500).json({ success: false, message: "Could not update user status." });
+    }
+  },
+);
+
+const listPendingApplications: RequestHandler = async (_req, res) => {
+  try {
+    const applications = await mongoDB
+      .collection("vendor_applications")
+      .find({ status: "pending" })
+      .sort({ createdAt: -1 })
+      .toArray();
+    res.json({ success: true, data: applications });
+  } catch (error) {
+    console.error("Load pending vendor applications failed:", error);
+    res.status(500).json({
+      success: false,
+      message: "Could not load pending vendor applications.",
+    });
+  }
+};
+
+router.get("/vendors/pending", requireAuth, requireAdmin, listPendingApplications);
+
 router.get(
   "/vendors/applications",
   requireAuth,
-  allowRoles("admin"),
+  requireAdmin,
   async (_req, res) => {
     try {
       const applications = await mongoDB
@@ -422,98 +693,48 @@ router.get(
 );
 
 router.patch(
+  "/vendors/:id/approve",
+  requireAuth,
+  requireAdmin,
+  reviewApplication("approved"),
+);
+router.patch(
+  "/vendors/:id/reject",
+  requireAuth,
+  requireAdmin,
+  reviewApplication("rejected"),
+);
+
+const reviewLegacyApplication: RequestHandler = (req, res, next) => {
+  const status = (req.body as { status?: unknown } | null)?.status;
+  if (status !== "approved" && status !== "rejected") {
+    res.status(400).json({
+      success: false,
+      message: "Status must be approved or rejected.",
+    });
+    return;
+  }
+  return reviewApplication(status)(req, res, next);
+};
+
+router.patch(
   "/vendors/applications/:id",
   requireAuth,
-  allowRoles("admin"),
-  async (req, res) => {
-    try {
-      const id = String(req.params.id);
-      const { status } = req.body as { status?: unknown };
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid application ID.",
-        });
-      }
-      if (status !== "approved" && status !== "rejected") {
-        return res.status(400).json({
-          success: false,
-          message: "Status must be approved or rejected.",
-        });
-      }
-
-      const applications = mongoDB.collection("vendor_applications");
-      const application = await applications.findOne({ _id: new ObjectId(id) });
-      if (!application) {
-        return res.status(404).json({
-          success: false,
-          message: "Vendor application not found.",
-        });
-      }
-
-      if (status === "approved") {
-        const applicantId = String(application.userId);
-        const userFilter = authUserFilter(applicantId);
-        const userUpdate = await mongoDB.collection<AuthUserDocument>("user").updateOne(
-          userFilter,
-          { $set: { role: "vendor", updatedAt: new Date() } },
-        );
-        if (userUpdate.matchedCount === 0) {
-          return res.status(404).json({
-            success: false,
-            message: "Applicant account not found.",
-          });
-        }
-        await mongoDB.collection("stores").updateOne(
-          { ownerId: String(application.userId) },
-          {
-            $setOnInsert: {
-              ownerId: String(application.userId),
-              storeName: String(application.storeName),
-              description: String(application.description),
-              phone: "",
-              address: "",
-              createdAt: new Date(),
-            },
-          },
-          { upsert: true },
-        );
-      }
-
-      await applications.updateOne(
-        { _id: new ObjectId(id) },
-        {
-          $set: {
-            status,
-            reviewedBy: req.authUser!.id,
-            reviewedAt: new Date(),
-            updatedAt: new Date(),
-          },
-        },
-      );
-      const updatedApplication = await applications.findOne({
-        _id: new ObjectId(id),
-      });
-      res.json({ success: true, data: updatedApplication });
-    } catch (error) {
-      console.error("Review vendor application failed:", error);
-      res.status(500).json({
-        success: false,
-        message: "Could not review vendor application.",
-      });
-    }
-  },
+  requireAdmin,
+  reviewLegacyApplication,
 );
 
 router.get(
   "/analytics",
   requireAuth,
-  allowRoles("admin"),
+  requireAdmin,
   async (_req, res) => {
     try {
-      const [users, vendors, products, orders] = await Promise.all([
+      const [users, customers, vendors, pendingVendors, products, orders] = await Promise.all([
         mongoDB.collection("user").countDocuments(),
+        mongoDB.collection("user").countDocuments({ role: "customer" }),
         mongoDB.collection("user").countDocuments({ role: "vendor" }),
+        mongoDB.collection("user").countDocuments({ vendorStatus: "pending" }),
         mongoDB.collection("products").countDocuments(),
         mongoDB
           .collection("orders")
@@ -544,7 +765,9 @@ router.get(
         success: true,
         data: {
           users,
+          customers,
           vendors,
+          pendingVendors,
           products,
           totalOrders: orders.length,
           completedRevenue,

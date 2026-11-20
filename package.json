@@ -7,7 +7,9 @@
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
-    "seed:data": "tsx src/scripts/seedData.ts"
+    "seed:data": "tsx src/scripts/seedData.ts",
+    "migrate:rbac": "tsx src/scripts/migrateRbac.ts",
+    "admin:promote": "tsx src/scripts/promoteAdmin.ts"
   },
   "dependencies": {
     "@better-auth/mongo-adapter": "latest",

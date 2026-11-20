@@ -2,18 +2,23 @@
 import { Router } from "express";
 import { ObjectId } from "mongodb";
 import { mongoDB } from "../config/db.js";
-import { requireAuth, allowRoles } from "../middleware/auth.js";
+import {
+  requireAdmin,
+  requireAuth,
+  requireCustomer,
+} from "../middleware/auth.js";
 
 const router = Router();
 
 // Create a new order
-router.post("/", requireAuth, allowRoles("customer", "admin"), async (req, res) => {
+router.post("/", requireAuth, requireCustomer, async (req, res) => {
   try {
-    const { items, deliveryAddress, phone } = req.body as {
+    const body = req.body as {
       items?: Array<{ productId: string; size?: string; quantity: number }>;
       deliveryAddress?: string;
       phone?: string;
-    };
+    } | null;
+    const { items, deliveryAddress, phone } = body ?? {};
 
     if (
       !Array.isArray(items) ||
@@ -94,6 +99,7 @@ router.post("/", requireAuth, allowRoles("customer", "admin"), async (req, res) 
         price: product.price,
         quantity: item.quantity,
         subtotal: product.price * item.quantity,
+        status: "pending",
       });
     }
 
@@ -132,14 +138,15 @@ router.post("/", requireAuth, allowRoles("customer", "admin"), async (req, res) 
 router.post(
   "/checkout",
   requireAuth,
-  allowRoles("customer"),
+  requireCustomer,
   async (req, res) => {
     try {
-      const { deliveryAddress, phone, notes } = req.body as {
+      const body = req.body as {
         deliveryAddress?: string;
         phone?: string;
         notes?: string;
-      };
+      } | null;
+      const { deliveryAddress, phone, notes } = body ?? {};
 
       if (
         typeof deliveryAddress !== "string" ||
@@ -243,6 +250,7 @@ router.post(
           price: product.price,
           quantity: item.quantity,
           subtotal: product.price * item.quantity,
+          status: "pending",
         });
       }
 
@@ -304,7 +312,7 @@ router.post(
 
 
 // Customer: Get own orders
-router.get("/my", requireAuth, async (req, res) => {
+router.get("/my", requireAuth, requireCustomer, async (req, res) => {
   try {
     const orders = await mongoDB
       .collection("orders")
@@ -322,7 +330,7 @@ router.get("/my", requireAuth, async (req, res) => {
 });
 
 // Admin: Get all orders
-router.get("/admin/all", requireAuth, allowRoles("admin"), async (_req, res) => {
+router.get("/admin/all", requireAuth, requireAdmin, async (_req, res) => {
   try {
     const orders = await mongoDB
       .collection("orders")
@@ -343,11 +351,11 @@ router.get("/admin/all", requireAuth, allowRoles("admin"), async (_req, res) => 
 router.patch(
   "/admin/:id/status",
   requireAuth,
-  allowRoles("admin"),
+  requireAdmin,
   async (req, res) => {
     try {
     const id = String(req.params.id);
-      const { status } = req.body as { status?: string };
+      const status = (req.body as { status?: unknown } | null)?.status;
 
       const allowedStatuses = [
         "pending",
@@ -365,7 +373,7 @@ router.patch(
         });
       }
 
-      if (!status || !allowedStatuses.includes(status)) {
+      if (typeof status !== "string" || !allowedStatuses.includes(status)) {
         return res.status(400).json({
           success: false,
           message: "Invalid order status.",
@@ -377,6 +385,7 @@ router.patch(
         {
           $set: {
             status,
+            "items.$[].status": status,
             updatedAt: new Date(),
           },
         }
@@ -389,9 +398,13 @@ router.patch(
         });
       }
 
+      const order = await mongoDB.collection("orders").findOne({
+        _id: new ObjectId(id),
+      });
       res.json({
         success: true,
         message: "Order status updated successfully.",
+        data: order,
       });
     } catch {
       res.status(500).json({
@@ -406,7 +419,7 @@ router.patch(
 router.delete(
   "/admin/:id",
   requireAuth,
-  allowRoles("admin"),
+  requireAdmin,
   async (req, res) => {
     try {
    const id = String(req.params.id);
