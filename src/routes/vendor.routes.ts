@@ -1,6 +1,6 @@
 import { Router, type RequestHandler } from "express";
 import { ObjectId } from "mongodb";
-import { mongoDB } from "../config/db.js";
+import { mongoClient, mongoDB } from "../config/db.js";
 import {
   requireApprovedVendor,
   requireAuth,
@@ -14,6 +14,10 @@ import {
   type OrderRecord,
   type OrderStatus,
 } from "../lib/order-management.js";
+import {
+  makeCustomerStatusNotification,
+  recordOrderNotification,
+} from "../lib/order-notifications.js";
 
 const router = Router();
 
@@ -22,6 +26,7 @@ type VendorOrderItem = {
   productId: string;
   vendorId: string;
   status: OrderStatus;
+  rejectionReason?: string;
   name: string;
   size: string;
   image: string;
@@ -40,6 +45,15 @@ type VendorOrderWithItems = {
   vendorTotal: number;
   items: VendorOrderItem[];
 };
+
+class VendorOrderError extends Error {
+  constructor(
+    readonly statusCode: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 async function loadVendorOrders(vendorId: string): Promise<VendorOrderWithItems[]> {
   const products = await mongoDB
@@ -92,6 +106,9 @@ async function loadVendorOrders(vendorId: string): Promise<VendorOrderWithItems[
       subtotal: Number(
         item.subtotal ?? Number(item.price ?? 0) * Number(item.quantity ?? 0),
       ),
+      ...(typeof item.rejectionReason === "string"
+        ? { rejectionReason: item.rejectionReason }
+        : {}),
     }));
 
     return [{
@@ -116,7 +133,13 @@ function updateVendorOrderItem(legacyProductId = false): RequestHandler {
     const selector = legacyProductId
       ? (req.body as { productId?: unknown } | null)?.productId
       : req.params.itemId;
-    const status = (req.body as { status?: unknown } | null)?.status;
+    const body = req.body as {
+      status?: unknown;
+      rejectionReason?: unknown;
+      productId?: unknown;
+    } | null;
+    const status = body?.status;
+    const rejectionReason = body?.rejectionReason;
     if (!ObjectId.isValid(orderId)) {
       res.status(400).json({ success: false, message: "Invalid order ID." });
       return;
@@ -141,139 +164,202 @@ function updateVendorOrderItem(legacyProductId = false): RequestHandler {
       res.status(400).json({ success: false, message: "Invalid vendor order status." });
       return;
     }
+    if (
+      (status === "rejected" &&
+        (typeof rejectionReason !== "string" ||
+          rejectionReason.trim().length < 5 ||
+          rejectionReason.trim().length > 500)) ||
+      (status !== "rejected" && rejectionReason !== undefined)
+    ) {
+      res.status(400).json({
+        success: false,
+        message: "A rejection reason between 5 and 500 characters is required when rejecting an item.",
+      });
+      return;
+    }
 
+    const session = mongoClient.startSession();
     try {
       const vendorId = req.authUser!.id;
-      const productIds = await mongoDB
-        .collection("products")
-        .find({ vendorId })
-        .project({ _id: 1 })
-        .toArray();
-      const ownedProductIds = new Set(productIds.map((product) => String(product._id)));
       const orderObjectId = new ObjectId(orderId);
       const orders = mongoDB.collection<OrderRecord>("orders");
-      const order = await orders.findOne({ _id: orderObjectId });
-      if (!order) {
-        res.status(404).json({ success: false, message: "Order not found." });
-        return;
-      }
+      await session.withTransaction(async () => {
+        const productIds = await mongoDB
+          .collection("products")
+          .find({ vendorId }, { session })
+          .project({ _id: 1 })
+          .toArray();
+        const ownedProductIds = new Set(productIds.map((product) => String(product._id)));
+        const order = await orders.findOne({ _id: orderObjectId }, { session });
+        if (!order) throw new VendorOrderError(404, "Order not found.");
 
-      const items = order.items ?? [];
-      const selectedIndex = items.findIndex((item, index) => {
-        const ownsItem =
-          item.vendorId === vendorId ||
-          (item.vendorId == null && ownedProductIds.has(String(item.productId)));
-        if (!ownsItem) return false;
-        if (legacyProductId) return String(item.productId) === selector;
-        return String(item.itemId ?? item._id ?? `legacy_${index}`) === selector;
-      });
-      if (selectedIndex < 0) {
-        res.status(404).json({ success: false, message: "Order item not found in your store." });
-        return;
-      }
-
-      const selectedItem = items[selectedIndex];
-      const currentStatus = getItemStatus(selectedItem, order.status);
-      if (
-        status !== currentStatus &&
-        !vendorStatusTransitions[currentStatus].includes(status)
-      ) {
-        res.status(400).json({
-          success: false,
-          message: `Cannot change this item from ${currentStatus} to ${status}.`,
+        const items = order.items ?? [];
+        const selectedIndex = items.findIndex((item, index) => {
+          const ownsItem =
+            item.vendorId === vendorId ||
+            (item.vendorId == null && ownedProductIds.has(String(item.productId)));
+          if (!ownsItem) return false;
+          if (legacyProductId) return String(item.productId) === selector;
+          return String(item.itemId ?? item._id ?? `legacy_${index}`) === selector;
         });
-        return;
-      }
+        if (selectedIndex < 0) {
+          throw new VendorOrderError(404, "Order item not found in your store.");
+        }
 
-      const now = new Date();
-      const itemIdField =
-        selectedItem.itemId !== undefined
-          ? "itemId"
-          : selectedItem._id !== undefined
-            ? "_id"
-            : null;
-      let updateResult;
-      if (itemIdField) {
-        const storedItemId = selectedItem[itemIdField];
-        const itemIds =
-          storedItemId instanceof ObjectId
-            ? [storedItemId, storedItemId.toHexString()]
-            : [storedItemId];
-        updateResult = await orders.updateOne(
-          {
+        const selectedItem = items[selectedIndex];
+        const currentStatus = getItemStatus(selectedItem, order.status);
+        if (
+          status !== currentStatus &&
+          !vendorStatusTransitions[currentStatus].includes(status)
+        ) {
+          throw new VendorOrderError(
+            400,
+            `Cannot change this item from ${currentStatus} to ${status}.`,
+          );
+        }
+
+        const now = new Date();
+        const statusChanged = status !== currentStatus;
+        const itemIdField =
+          selectedItem.itemId !== undefined
+            ? "itemId"
+            : selectedItem._id !== undefined
+              ? "_id"
+              : null;
+        let updateResult;
+        if (itemIdField) {
+          const storedItemId = selectedItem[itemIdField];
+          const itemIds =
+            storedItemId instanceof ObjectId
+              ? [storedItemId, storedItemId.toHexString()]
+              : [storedItemId];
+          updateResult = await orders.updateOne(
+            {
+              _id: orderObjectId,
+              items: {
+                $elemMatch: {
+                  [itemIdField]: { $in: itemIds },
+                  productId: selectedItem.productId,
+                  vendorId: selectedItem.vendorId ?? null,
+                  ...(selectedItem.status === undefined
+                    ? { status: { $exists: false } }
+                    : { status: selectedItem.status }),
+                },
+              },
+            },
+            {
+              $set: {
+                "items.$[line].status": status,
+                "items.$[line].vendorId": vendorId,
+                updatedAt: now,
+                ...(status === "rejected"
+                  ? { "items.$[line].rejectionReason": (rejectionReason as string).trim() }
+                  : {}),
+              },
+              ...(status === "rejected"
+                ? {}
+                : { $unset: { "items.$[line].rejectionReason": "" } }),
+            },
+            {
+              arrayFilters: [
+                {
+                  [`line.${itemIdField}`]: { $in: itemIds },
+                  "line.productId": selectedItem.productId,
+                  "line.vendorId": selectedItem.vendorId ?? null,
+                  ...(selectedItem.status === undefined
+                    ? { "line.status": { $exists: false } }
+                    : { "line.status": selectedItem.status }),
+                },
+              ],
+              session,
+            },
+          );
+        } else {
+          const itemPrefix = `items.${selectedIndex}`;
+          const filter: Record<string, unknown> = {
             _id: orderObjectId,
-            items: {
-              $elemMatch: {
-                [itemIdField]: { $in: itemIds },
-                productId: selectedItem.productId,
-                vendorId: selectedItem.vendorId ?? null,
+            [`${itemPrefix}.productId`]: selectedItem.productId,
+          };
+          filter[`${itemPrefix}.vendorId`] =
+            selectedItem.vendorId === undefined
+              ? { $exists: false }
+              : selectedItem.vendorId;
+          filter[`${itemPrefix}.status`] =
+            selectedItem.status === undefined
+              ? { $exists: false }
+              : selectedItem.status;
+          updateResult = await orders.updateOne(
+            filter,
+            {
+              $set: {
+                [`${itemPrefix}.status`]: status,
+                [`${itemPrefix}.vendorId`]: vendorId,
+                updatedAt: now,
+                ...(status === "rejected"
+                  ? { [`${itemPrefix}.rejectionReason`]: (rejectionReason as string).trim() }
+                  : {}),
               },
+              ...(status === "rejected"
+                ? {}
+                : { $unset: { [`${itemPrefix}.rejectionReason`]: "" } }),
             },
-          },
-          {
-            $set: {
-              "items.$[line].status": status,
-              "items.$[line].vendorId": vendorId,
-              updatedAt: now,
-            },
-          },
-          {
-            arrayFilters: [
-              {
-                [`line.${itemIdField}`]: { $in: itemIds },
-                "line.productId": selectedItem.productId,
-                "line.vendorId": selectedItem.vendorId ?? null,
-              },
-            ],
-          },
-        );
-      } else {
-        const itemPrefix = `items.${selectedIndex}`;
-        const filter: Record<string, unknown> = {
-          _id: orderObjectId,
-          [`${itemPrefix}.productId`]: selectedItem.productId,
-        };
-        filter[`${itemPrefix}.vendorId`] =
-          selectedItem.vendorId === undefined
-            ? { $exists: false }
-            : selectedItem.vendorId;
-        updateResult = await orders.updateOne(
-          filter,
-          {
-            $set: {
-              [`${itemPrefix}.status`]: status,
-              [`${itemPrefix}.vendorId`]: vendorId,
-              updatedAt: now,
-            },
-          },
-        );
-      }
-      if (updateResult.matchedCount === 0) {
-        res.status(409).json({
-          success: false,
-          message: "The order item changed. Refresh and try again.",
-        });
-        return;
-      }
+            { session },
+          );
+        }
+        if (updateResult.matchedCount === 0) {
+          throw new VendorOrderError(
+            409,
+            "The order item changed. Refresh and try again.",
+          );
+        }
 
-      const refreshedOrder = await orders.findOne({ _id: orderObjectId });
-      if (refreshedOrder) {
+        const refreshedOrder = await orders.findOne(
+          { _id: orderObjectId },
+          { session },
+        );
+        if (!refreshedOrder) {
+          throw new VendorOrderError(404, "Order not found.");
+        }
         await orders.updateOne(
           { _id: orderObjectId },
           { $set: { status: getOrderStatus(refreshedOrder) } },
+          { session },
         );
-      }
-
+        if (statusChanged) {
+          const store = await mongoDB.collection("stores").findOne(
+            { ownerId: vendorId },
+            { projection: { storeName: 1 }, session },
+          );
+          const notification = makeCustomerStatusNotification({
+            order: refreshedOrder,
+            item: selectedItem,
+            itemId: String(selectedItem.itemId ?? selectedItem._id ?? `legacy_${selectedIndex}`),
+            vendorId,
+            vendorName: String(store?.storeName ?? "Your vendor"),
+            status,
+            ...(status === "rejected" && typeof rejectionReason === "string"
+              ? { rejectionReason: rejectionReason.trim() }
+              : {}),
+          });
+          if (notification) await recordOrderNotification(notification, session);
+        }
+      });
       const updatedVendorOrder = (await loadVendorOrders(vendorId)).find(
         (entry) => String(entry._id) === orderId,
       );
       res.json({ success: true, data: updatedVendorOrder ?? null });
     } catch (error) {
+      if (error instanceof VendorOrderError) {
+        res.status(error.statusCode).json({ success: false, message: error.message });
+        return;
+      }
       console.error("Update vendor order item status failed:", error);
       res.status(500).json({
         success: false,
         message: "Could not update order item status.",
       });
+    } finally {
+      await session.endSession();
     }
   };
 }

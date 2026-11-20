@@ -11,14 +11,107 @@ import {
   getItemStatus,
   getOrderStatus,
   normalizeOrder,
+  type OrderLine,
   type OrderRecord,
 } from "../lib/order-management.js";
 import {
   listAdminOrders,
   updateAdminOrderStatus,
 } from "../controllers/admin-orders.js";
+import {
+  createCustomerOrderIssue,
+  listCustomerOrderIssues,
+} from "../controllers/order-issues.js";
+import {
+  listOrderNotifications,
+  markOrderNotificationRead,
+} from "../controllers/order-notifications.js";
 
 const router = Router();
+
+async function addCustomerVendorDetails(orders: OrderRecord[]): Promise<OrderRecord[]> {
+  const unresolvedProductIds = [
+    ...new Set(
+      orders.flatMap((order) =>
+        (order.items ?? [])
+          .filter((item) => item.vendorId == null)
+          .map((item) => String(item.productId)),
+      ),
+    ),
+  ]
+    .filter(ObjectId.isValid)
+    .map((id) => new ObjectId(id));
+  const productOwners = unresolvedProductIds.length
+    ? await mongoDB
+        .collection("products")
+        .find({ _id: { $in: unresolvedProductIds } })
+        .project({ _id: 1, vendorId: 1 })
+        .toArray()
+    : [];
+  const ownerByProduct = new Map(
+    productOwners
+      .filter((product) => typeof product.vendorId === "string")
+      .map((product) => [String(product._id), product.vendorId as string]),
+  );
+  const vendorIds = [
+    ...new Set(
+      orders.flatMap((order) =>
+        (order.items ?? [])
+          .map(
+            (item) =>
+              (typeof item.vendorId === "string" ? item.vendorId : undefined) ??
+              ownerByProduct.get(String(item.productId)),
+          )
+          .filter((id): id is string => Boolean(id)),
+      ),
+    ),
+  ];
+  const stores = vendorIds.length
+    ? await mongoDB
+        .collection("stores")
+        .find({ ownerId: { $in: vendorIds } })
+        .project({ ownerId: 1, storeName: 1 })
+        .toArray()
+    : [];
+  const storeNames = new Map(
+    stores.map((store) => [String(store.ownerId), String(store.storeName ?? "")]),
+  );
+
+  return orders.map((order) => {
+    const normalized = normalizeOrder(order);
+    return {
+      ...normalized,
+      items: ((normalized.items ?? []) as OrderLine[]).map((item) => {
+        const vendorId =
+          (typeof item.vendorId === "string" ? item.vendorId : undefined) ??
+          ownerByProduct.get(String(item.productId)) ??
+          null;
+        return {
+          ...item,
+          vendorId,
+          vendorName: vendorId
+            ? storeNames.get(vendorId) || "PizzaHub vendor"
+            : "PizzaHub platform",
+        };
+      }),
+    };
+  });
+}
+
+router.get(
+  "/notifications",
+  requireAuth,
+  requireCustomer,
+  listOrderNotifications("customer"),
+);
+router.patch(
+  "/notifications/:id/read",
+  requireAuth,
+  requireCustomer,
+  markOrderNotificationRead("customer"),
+);
+router.get("/issues/my", requireAuth, requireCustomer, listCustomerOrderIssues);
+router.post("/:id/issues", requireAuth, requireCustomer, createCustomerOrderIssue);
 
 // Create a new order
 router.post("/", requireAuth, requireCustomer, async (req, res) => {
@@ -342,7 +435,7 @@ router.get("/my", requireAuth, requireCustomer, async (req, res) => {
       .sort({ createdAt: -1 })
       .toArray();
 
-    res.json({ success: true, data: orders.map(normalizeOrder) });
+    res.json({ success: true, data: await addCustomerVendorDetails(orders) });
   } catch (error) {
     console.error("Load customer orders failed:", error);
     res.status(500).json({
@@ -365,7 +458,8 @@ router.get("/:id", requireAuth, requireCustomer, async (req, res) => {
     if (!order) {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
-    return res.json({ success: true, data: normalizeOrder(order) });
+    const [orderWithVendorDetails] = await addCustomerVendorDetails([order]);
+    return res.json({ success: true, data: orderWithVendorDetails });
   } catch (error) {
     console.error("Load customer order failed:", error);
     return res.status(500).json({ success: false, message: "Could not load order." });
@@ -420,7 +514,8 @@ router.patch("/:id/cancel", requireAuth, requireCustomer, async (req, res) => {
     if (!updated) {
       return res.status(404).json({ success: false, message: "Order not found." });
     }
-    return res.json({ success: true, data: normalizeOrder(updated) });
+    const [orderWithVendorDetails] = await addCustomerVendorDetails([updated]);
+    return res.json({ success: true, data: orderWithVendorDetails });
   } catch (error) {
     console.error("Cancel customer order failed:", error);
     return res.status(500).json({ success: false, message: "Could not cancel order." });

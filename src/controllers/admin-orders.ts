@@ -1,6 +1,6 @@
 import type { RequestHandler } from "express";
-import { ObjectId } from "mongodb";
-import { mongoDB } from "../config/db.js";
+import { ObjectId, type ClientSession } from "mongodb";
+import { mongoClient, mongoDB } from "../config/db.js";
 import {
   adminStatusTransitions,
   getItemStatus,
@@ -9,13 +9,56 @@ import {
   normalizeOrder,
   type OrderRecord,
 } from "../lib/order-management.js";
+import {
+  makeCustomerStatusNotification,
+  recordOrderNotification,
+} from "../lib/order-notifications.js";
 
-async function addVendorNames(orders: OrderRecord[]): Promise<OrderRecord[]> {
+class AdminOrderError extends Error {
+  constructor(
+    readonly statusCode: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+async function addVendorNames(
+  orders: OrderRecord[],
+  session?: ClientSession,
+): Promise<OrderRecord[]> {
+  const unresolvedProductIds = [
+    ...new Set(
+      orders.flatMap((order) =>
+        (order.items ?? [])
+          .filter((item) => item.vendorId == null)
+          .map((item) => String(item.productId)),
+      ),
+    ),
+  ]
+    .filter(ObjectId.isValid)
+    .map((id) => new ObjectId(id));
+  const productOwners = unresolvedProductIds.length
+    ? await mongoDB
+        .collection("products")
+        .find({ _id: { $in: unresolvedProductIds } }, session ? { session } : {})
+        .project({ _id: 1, vendorId: 1 })
+        .toArray()
+    : [];
+  const ownerByProduct = new Map(
+    productOwners
+      .filter((product) => typeof product.vendorId === "string")
+      .map((product) => [String(product._id), product.vendorId as string]),
+  );
   const vendorIds = [
     ...new Set(
       orders.flatMap((order) =>
         (order.items ?? [])
-          .map((item) => item.vendorId)
+          .map(
+            (item) =>
+              (typeof item.vendorId === "string" ? item.vendorId : undefined) ??
+              ownerByProduct.get(String(item.productId)),
+          )
           .filter((id): id is string => typeof id === "string"),
       ),
     ),
@@ -24,7 +67,7 @@ async function addVendorNames(orders: OrderRecord[]): Promise<OrderRecord[]> {
 
   const stores = await mongoDB
     .collection("stores")
-    .find({ ownerId: { $in: vendorIds } })
+    .find({ ownerId: { $in: vendorIds } }, session ? { session } : {})
     .project({ ownerId: 1, storeName: 1 })
     .toArray();
   const storeNames = new Map(
@@ -34,13 +77,17 @@ async function addVendorNames(orders: OrderRecord[]): Promise<OrderRecord[]> {
     const normalized = normalizeOrder(order);
     return {
       ...normalized,
-      items: (normalized.items ?? []).map((item) => ({
-        ...item,
-        vendorName:
-          typeof item.vendorId === "string"
-            ? storeNames.get(item.vendorId) || item.vendorId
-            : null,
-      })),
+      items: (normalized.items ?? []).map((item) => {
+        const vendorId =
+          (typeof item.vendorId === "string" ? item.vendorId : undefined) ??
+          ownerByProduct.get(String(item.productId)) ??
+          null;
+        return {
+          ...item,
+          vendorId,
+          vendorName: vendorId ? storeNames.get(vendorId) || vendorId : null,
+        };
+      }),
     };
   });
 }
@@ -137,7 +184,11 @@ export const getAdminOrder: RequestHandler = async (req, res) => {
 
 export const updateAdminOrderStatus: RequestHandler = async (req, res) => {
   const id = String(req.params.id);
-  const status = (req.body as { status?: unknown } | null)?.status;
+  const body = req.body as {
+    status?: unknown;
+    rejectionReason?: unknown;
+  } | null;
+  const { status, rejectionReason } = body ?? {};
   if (!ObjectId.isValid(id)) {
     res.status(400).json({ success: false, message: "Invalid order ID." });
     return;
@@ -146,47 +197,96 @@ export const updateAdminOrderStatus: RequestHandler = async (req, res) => {
     res.status(400).json({ success: false, message: "Invalid order status." });
     return;
   }
+  if (
+    rejectionReason !== undefined &&
+    (typeof rejectionReason !== "string" ||
+      rejectionReason.trim().length < 5 ||
+      rejectionReason.trim().length > 500)
+  ) {
+    res.status(400).json({ success: false, message: "Invalid rejection reason." });
+    return;
+  }
 
+  const session = mongoClient.startSession();
   try {
     const orderId = new ObjectId(id);
     const orders = mongoDB.collection<OrderRecord>("orders");
-    const order = await orders.findOne({ _id: orderId });
-    if (!order) {
-      res.status(404).json({ success: false, message: "Order not found." });
-      return;
-    }
+    let updatedWithVendorNames: OrderRecord | null = null;
+    await session.withTransaction(async () => {
+      const order = await orders.findOne({ _id: orderId }, { session });
+      if (!order) throw new AdminOrderError(404, "Order not found.");
 
-    const currentStatuses = (order.items ?? []).map((item) =>
-      getItemStatus(item, order.status),
-    );
-    if (currentStatuses.length === 0) currentStatuses.push(getOrderStatus(order));
-    const invalidTransition = currentStatuses.find(
-      (current) =>
-        current !== status && !adminStatusTransitions[current].includes(status),
-    );
-    if (invalidTransition) {
-      res.status(400).json({
-        success: false,
-        message: `Cannot change an order item from ${invalidTransition} to ${status}.`,
-      });
-      return;
-    }
+      const currentStatuses = (order.items ?? []).map((item) =>
+        getItemStatus(item, order.status),
+      );
+      if (currentStatuses.length === 0) currentStatuses.push(getOrderStatus(order));
+      const invalidTransition = currentStatuses.find(
+        (current) =>
+          current !== status && !adminStatusTransitions[current].includes(status),
+      );
+      if (invalidTransition) {
+        throw new AdminOrderError(
+          400,
+          `Cannot change an order item from ${invalidTransition} to ${status}.`,
+        );
+      }
 
-    const update: Record<string, unknown> = {
-      status,
-      updatedAt: new Date(),
-    };
-    if (order.items?.length) update["items.$[].status"] = status;
-    await orders.updateOne({ _id: orderId }, { $set: update });
-    const updated = await orders.findOne({ _id: orderId });
-    if (!updated) {
-      res.status(404).json({ success: false, message: "Order not found." });
-      return;
-    }
-    const [updatedWithVendorNames] = await addVendorNames([updated]);
+      const update: Record<string, unknown> = {
+        status,
+        updatedAt: new Date(),
+      };
+      if (order.items?.length) {
+        update["items.$[].status"] = status;
+        if (status === "rejected") {
+          update["items.$[].rejectionReason"] =
+            typeof rejectionReason === "string"
+              ? rejectionReason.trim()
+              : "Rejected by an administrator.";
+        }
+      }
+      const filter: Record<string, unknown> = { _id: orderId };
+      filter.items =
+        order.items === undefined ? { $exists: false } : order.items;
+      const result = await orders.updateOne(
+        filter,
+        { $set: update },
+        { session },
+      );
+      if (result.matchedCount === 0) {
+        throw new AdminOrderError(409, "The order changed. Refresh and retry.");
+      }
+
+      const updated = await orders.findOne({ _id: orderId }, { session });
+      if (!updated) throw new AdminOrderError(404, "Order not found.");
+      const [enrichedOrder] = await addVendorNames([updated], session);
+      for (const [index, item] of (enrichedOrder.items ?? []).entries()) {
+        if (currentStatuses[index] === status) continue;
+        const notification = makeCustomerStatusNotification({
+          order: updated,
+          item,
+          itemId: String(item.itemId ?? item._id ?? `legacy_${index}`),
+          vendorId: item.vendorId ?? null,
+          vendorName: String(
+            item.vendorName ?? (item.vendorId ? "Your vendor" : "PizzaHub"),
+          ),
+          status,
+          ...(status === "rejected" && typeof item.rejectionReason === "string"
+            ? { rejectionReason: item.rejectionReason }
+            : {}),
+        });
+        if (notification) await recordOrderNotification(notification, session);
+      }
+      updatedWithVendorNames = enrichedOrder;
+    });
     res.json({ success: true, data: updatedWithVendorNames });
   } catch (error) {
+    if (error instanceof AdminOrderError) {
+      res.status(error.statusCode).json({ success: false, message: error.message });
+      return;
+    }
     console.error("Update admin order status failed:", error);
     res.status(500).json({ success: false, message: "Could not update order status." });
+  } finally {
+    await session.endSession();
   }
 };

@@ -4,6 +4,7 @@ import cors from "cors";
 import { toNodeHandler } from "better-auth/node";
 import { auth } from "./lib/auth.js";
 import { connectDatabase } from "./config/db.js";
+import { startVendorResponseMonitor } from "./lib/order-notifications.js";
 import apiRoutes from "./routes/index.js";
 
 const app = express();
@@ -35,6 +36,7 @@ app.use((_req, res) => {
 
 async function start() {
   await connectDatabase();
+  await startVendorResponseMonitor();
   app.listen(port, () => console.log(`PizzaHub server running at http://localhost:${port}`));
 }
 

@@ -9,9 +9,36 @@ import {
   listAdminOrders,
   updateAdminOrderStatus,
 } from "../controllers/admin-orders.js";
+import {
+  listAdminOrderIssues,
+  updateAdminOrderIssue,
+} from "../controllers/order-issues.js";
+import {
+  listOrderNotifications,
+  markOrderNotificationRead,
+} from "../controllers/order-notifications.js";
 
 const router = Router();
 
+router.get(
+  "/notifications",
+  requireAuth,
+  requireAdmin,
+  listOrderNotifications("admin"),
+);
+router.patch(
+  "/notifications/:id/read",
+  requireAuth,
+  requireAdmin,
+  markOrderNotificationRead("admin"),
+);
+router.get("/order-issues", requireAuth, requireAdmin, listAdminOrderIssues);
+router.patch(
+  "/order-issues/:id",
+  requireAuth,
+  requireAdmin,
+  updateAdminOrderIssue,
+);
 router.get("/orders", requireAuth, requireAdmin, listAdminOrders);
 router.get("/orders/:id", requireAuth, requireAdmin, getAdminOrder);
 router.patch(
