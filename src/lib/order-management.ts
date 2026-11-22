@@ -2,12 +2,22 @@ import { ObjectId } from "mongodb";
 
 export const orderStatuses = [
   "pending",
+  "accepted",
   "confirmed",
   "preparing",
   "out_for_delivery",
   "delivered",
   "cancelled",
   "rejected",
+] as const;
+
+// `confirmed` is kept for legacy orders; new approvals use `accepted`.
+export const activeOrderStatuses = [
+  "pending",
+  "accepted",
+  "confirmed",
+  "preparing",
+  "out_for_delivery",
 ] as const;
 
 export type OrderStatus = (typeof orderStatuses)[number];
@@ -31,6 +41,7 @@ export type OrderRecord = {
   userId?: string;
   customerName?: string;
   customerEmail?: string;
+  deliveryDate?: string;
   deliveryAddress?: string;
   phone?: string;
   notes?: string;
@@ -45,7 +56,8 @@ export type OrderRecord = {
 };
 
 export const adminStatusTransitions: Record<OrderStatus, readonly OrderStatus[]> = {
-  pending: ["confirmed", "rejected", "cancelled"],
+  pending: ["accepted", "rejected", "cancelled"],
+  accepted: ["preparing", "cancelled"],
   confirmed: ["preparing", "cancelled"],
   preparing: ["out_for_delivery", "cancelled"],
   out_for_delivery: ["delivered"],
@@ -55,7 +67,8 @@ export const adminStatusTransitions: Record<OrderStatus, readonly OrderStatus[]>
 };
 
 export const vendorStatusTransitions: Record<OrderStatus, readonly OrderStatus[]> = {
-  pending: ["confirmed", "rejected"],
+  pending: ["accepted", "rejected"],
+  accepted: ["preparing", "cancelled"],
   confirmed: ["preparing", "cancelled"],
   preparing: ["out_for_delivery", "cancelled"],
   out_for_delivery: ["delivered"],
@@ -85,6 +98,7 @@ export function getOrderStatus(order: OrderRecord): OrderStatus {
 
   const activePriority: OrderStatus[] = [
     "pending",
+    "accepted",
     "confirmed",
     "preparing",
     "out_for_delivery",

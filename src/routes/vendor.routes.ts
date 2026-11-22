@@ -18,6 +18,13 @@ import {
   makeCustomerStatusNotification,
   recordOrderNotification,
 } from "../lib/order-notifications.js";
+import { userFilterById, type UserDocument } from "../lib/users.js";
+import {
+  assertActiveItemCapacity,
+  checkActiveItemCapacity,
+  normalizeVendorPlan,
+  VendorPlanLimitError,
+} from "../lib/vendor-plan.js";
 
 const router = Router();
 
@@ -365,6 +372,73 @@ function updateVendorOrderItem(legacyProductId = false): RequestHandler {
 }
 
 router.get(
+  "/subscription",
+  requireAuth,
+  requireVendor,
+  async (req, res) => {
+    try {
+      const capacity = await checkActiveItemCapacity({
+        vendorId: req.authUser!.id,
+        plan: req.authUser!.plan,
+      });
+      res.json({ success: true, data: capacity });
+    } catch (error) {
+      console.error("Load subscription failed:", error);
+      res.status(500).json({ success: false, message: "Could not load your subscription." });
+    }
+  },
+);
+
+// Demo plan switch. Connect this endpoint to billing when subscription payments are enabled.
+router.post(
+  "/subscription",
+  requireAuth,
+  requireVendor,
+  async (req, res) => {
+    try {
+      const requested = (req.body as { plan?: unknown } | null)?.plan;
+      if (requested !== "free" && requested !== "premium") {
+        return res.status(400).json({
+          success: false,
+          message: "Choose either the Free or Premium plan.",
+        });
+      }
+      const plan = normalizeVendorPlan(requested);
+      if (plan === "free") {
+        const capacity = await checkActiveItemCapacity({
+          vendorId: req.authUser!.id,
+          plan: "free",
+        });
+        if (!capacity.allowed) {
+          return res.status(409).json({
+            success: false,
+            code: "PLAN_LIMIT_REACHED",
+            message: `You currently have ${capacity.activeItems} active menu items. Deactivate or remove items before switching to Free.`,
+            data: capacity,
+          });
+        }
+      }
+      await mongoDB.collection<UserDocument>("user").updateOne(
+        userFilterById(req.authUser!.id),
+        { $set: { plan, updatedAt: new Date() } },
+      );
+      const capacity = await checkActiveItemCapacity({
+        vendorId: req.authUser!.id,
+        plan,
+      });
+      return res.json({
+        success: true,
+        message: `Demo ${plan === "premium" ? "Premium" : "Free"} plan activated.`,
+        data: capacity,
+      });
+    } catch (error) {
+      console.error("Update subscription failed:", error);
+      return res.status(500).json({ success: false, message: "Could not update your subscription." });
+    }
+  },
+);
+
+router.get(
   "/products",
   requireAuth,
   requireVendor,
@@ -417,6 +491,13 @@ router.post(
         });
       }
 
+      assertActiveItemCapacity(
+        await checkActiveItemCapacity({
+          vendorId: req.authUser!.id,
+          plan: req.authUser!.plan,
+        }),
+      );
+
       const product = {
         name: (name as string).trim(),
         slug: productSlug,
@@ -438,8 +519,16 @@ router.post(
         data: { ...product, _id: result.insertedId },
       });
     } catch (error) {
+      if (error instanceof VendorPlanLimitError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          code: error.code,
+          message: error.message,
+          data: error.capacity,
+        });
+      }
       console.error("Create vendor product failed:", error);
-      res.status(500).json({ success: false, message: "Could not create product." });
+      return res.status(500).json({ success: false, message: "Could not create product." });
     }
   },
 );
@@ -453,6 +542,17 @@ router.put(
       const id = String(req.params.id);
       if (!ObjectId.isValid(id)) {
         return res.status(400).json({ success: false, message: "Invalid product ID." });
+      }
+
+      const existingProduct = await mongoDB.collection("products").findOne({
+        _id: new ObjectId(id),
+        vendorId: req.authUser!.id,
+      });
+      if (!existingProduct) {
+        return res.status(404).json({
+          success: false,
+          message: "Product not found in your store.",
+        });
       }
 
       const body = req.body as Record<string, unknown> | null;
@@ -505,6 +605,16 @@ router.put(
         }
       }
 
+      if (updateData.isAvailable === true && existingProduct.isAvailable !== true) {
+        assertActiveItemCapacity(
+          await checkActiveItemCapacity({
+            vendorId: req.authUser!.id,
+            plan: req.authUser!.plan,
+            excludeProductId: id,
+          }),
+        );
+      }
+
       updateData.updatedAt = new Date();
       const result = await mongoDB.collection("products").updateOne(
         { _id: new ObjectId(id), vendorId: req.authUser!.id },
@@ -523,8 +633,16 @@ router.put(
       });
       res.json({ success: true, data: product });
     } catch (error) {
+      if (error instanceof VendorPlanLimitError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          code: error.code,
+          message: error.message,
+          data: error.capacity,
+        });
+      }
       console.error("Update vendor product failed:", error);
-      res.status(500).json({ success: false, message: "Could not update product." });
+      return res.status(500).json({ success: false, message: "Could not update product." });
     }
   },
 );

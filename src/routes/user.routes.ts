@@ -43,7 +43,7 @@ function hasImageSignature(bytes: Buffer, mimeType: string) {
   return false;
 }
 
-// Public capability flag for the login/register screens. No credentials are exposed.
+// Public capability flag for the login screen. No credentials are exposed.
 router.get("/auth-providers", (_req, res) => {
   res.json({ success: true, data: { google: googleAuthEnabled } });
 });

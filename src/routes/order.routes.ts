@@ -26,6 +26,14 @@ import {
   listOrderNotifications,
   markOrderNotificationRead,
 } from "../controllers/order-notifications.js";
+import {
+  assertNoActiveDuplicateOrder,
+  assertNotOwnProduct,
+  assertUniqueRequestedProducts,
+  OrderRuleError,
+  validateDeliveryDate,
+  validateNotes,
+} from "../lib/order-rules.js";
 
 const router = Router();
 
@@ -113,29 +121,32 @@ router.patch(
 router.get("/issues/my", requireAuth, requireCustomer, listCustomerOrderIssues);
 router.post("/:id/issues", requireAuth, requireCustomer, createCustomerOrderIssue);
 
-// Create a new order
+// Create a new order from a product details page.
 router.post("/", requireAuth, requireCustomer, async (req, res) => {
   try {
     const body = req.body as {
       items?: Array<{ productId: string; size?: string; quantity: number }>;
+      deliveryDate?: string;
       deliveryAddress?: string;
       phone?: string;
+      notes?: string;
     } | null;
-    const { items, deliveryAddress, phone } = body ?? {};
+    const { items, deliveryAddress, phone, notes } = body ?? {};
 
     if (
       !Array.isArray(items) ||
       items.length === 0 ||
       typeof deliveryAddress !== "string" ||
-      !deliveryAddress.trim() ||
-      typeof phone !== "string" ||
-      !phone.trim()
+      !deliveryAddress.trim()
     ) {
       return res.status(400).json({
         success: false,
-        message: "Items, delivery address and phone are required.",
+        message: "Items, delivery date and delivery address are required.",
       });
     }
+
+    const deliveryDate = validateDeliveryDate(body?.deliveryDate);
+    const specialInstructions = validateNotes(notes);
 
     if (
       items.some(
@@ -172,6 +183,14 @@ router.post("/", requireAuth, requireCustomer, async (req, res) => {
         message: "One or more products are unavailable.",
       });
     }
+
+    assertUniqueRequestedProducts(products);
+    assertNotOwnProduct(products, req.authUser!.id);
+    await assertNoActiveDuplicateOrder({
+      userId: req.authUser!.id,
+      deliveryDate,
+      products,
+    });
 
     const orderItems = [];
     for (const item of items) {
@@ -225,10 +244,13 @@ router.post("/", requireAuth, requireCustomer, async (req, res) => {
     const order = {
       userId: req.authUser!.id,
       customerName: req.authUser!.name,
+      customerEmail: req.authUser!.email,
       items: orderItems,
       total,
+      deliveryDate,
       deliveryAddress: deliveryAddress.trim(),
-      phone: phone.trim(),
+      phone: typeof phone === "string" ? phone.trim() : "",
+      notes: specialInstructions,
       status: "pending",
       createdAt: new Date(),
       updatedAt: new Date(),
@@ -236,12 +258,21 @@ router.post("/", requireAuth, requireCustomer, async (req, res) => {
 
     const result = await mongoDB.collection("orders").insertOne(order);
 
-    res.status(201).json({
+    return res.status(201).json({
       success: true,
+      message: "Order placed successfully. Status: Pending.",
       data: { ...order, _id: result.insertedId },
     });
-  } catch {
-    res.status(500).json({
+  } catch (error) {
+    if (error instanceof OrderRuleError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+      });
+    }
+    console.error("Create order failed:", error);
+    return res.status(500).json({
       success: false,
       message: "Could not create order.",
     });
@@ -256,6 +287,7 @@ router.post(
   async (req, res) => {
     try {
       const body = req.body as {
+        deliveryDate?: string;
         deliveryAddress?: string;
         phone?: string;
         notes?: string;
@@ -270,10 +302,12 @@ router.post(
       ) {
         return res.status(400).json({
           success: false,
-          message: "Delivery address and phone are required.",
+          message: "Delivery date, address and phone are required.",
         });
       }
 
+      const deliveryDate = validateDeliveryDate(body?.deliveryDate);
+      const specialInstructions = validateNotes(notes);
       const userId = req.authUser!.id;
 
       const cart = await mongoDB.collection("carts").findOne({
@@ -306,6 +340,10 @@ router.post(
           message: "Some products in your cart are unavailable.",
         });
       }
+
+      assertUniqueRequestedProducts(products);
+      assertNotOwnProduct(products, userId);
+      await assertNoActiveDuplicateOrder({ userId, deliveryDate, products });
 
       const orderItems = [];
 
@@ -386,9 +424,10 @@ router.post(
         subtotal,
         deliveryFee,
         total,
+        deliveryDate,
         deliveryAddress: deliveryAddress.trim(),
         phone: phone.trim(),
-        notes: typeof notes === "string" ? notes.trim() : "",
+        notes: specialInstructions,
         status: "pending",
         createdAt: new Date(),
         updatedAt: new Date(),
@@ -415,6 +454,13 @@ router.post(
         },
       });
     } catch (error) {
+      if (error instanceof OrderRuleError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          code: error.code,
+          message: error.message,
+        });
+      }
       console.error("Checkout error:", error);
 
       return res.status(500).json({

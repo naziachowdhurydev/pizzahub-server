@@ -3,6 +3,7 @@ import { createRemoteJWKSet, jwtVerify } from "jose";
 import { mongoDB } from "../config/db.js";
 import type { UserDocument } from "../lib/users.js";
 import { userFilterById } from "../lib/users.js";
+import { normalizeVendorPlan, type VendorPlan } from "../lib/vendor-plan.js";
 
 export type UserRole = "customer" | "vendor" | "admin";
 export type VendorStatus = "not_applied" | "pending" | "approved" | "rejected";
@@ -19,6 +20,7 @@ declare global {
         role: UserRole;
         vendorStatus: VendorStatus;
         status: AccountStatus;
+        plan: VendorPlan;
       };
     }
   }
@@ -85,6 +87,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   if (status !== "active") {
     return res.status(403).json({ success: false, message: "This account is suspended." });
   }
+  const plan = normalizeVendorPlan(user.plan);
 
   req.authUser = {
     id: String(user.id ?? user._id),
@@ -94,6 +97,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     role,
     vendorStatus,
     status,
+    plan,
   };
   return next();
 }

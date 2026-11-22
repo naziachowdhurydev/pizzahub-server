@@ -52,7 +52,7 @@ Expected when configured:
 {"success":true,"data":{"google":true}}
 ```
 
-Then open `http://localhost:3000/login` or `/register` and use the Google button.
+Then open `http://localhost:3000/login` and use the Google button.
 A successful sign-in lands on the role-appropriate dashboard.
 
 ## Troubleshooting

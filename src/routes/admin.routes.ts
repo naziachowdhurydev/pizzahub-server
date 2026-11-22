@@ -17,6 +17,12 @@ import {
   listOrderNotifications,
   markOrderNotificationRead,
 } from "../controllers/order-notifications.js";
+import {
+  assertActiveItemCapacity,
+  checkActiveItemCapacity,
+  getVendorPlan,
+  VendorPlanLimitError,
+} from "../lib/vendor-plan.js";
 
 const router = Router();
 
@@ -295,6 +301,14 @@ router.post("/products", async (req, res) => {
     }
 
     const productVendorId = await resolveProductVendorId(vendorId);
+    if (productVendorId) {
+      assertActiveItemCapacity(
+        await checkActiveItemCapacity({
+          vendorId: productVendorId,
+          plan: await getVendorPlan(productVendorId),
+        }),
+      );
+    }
     const product = {
       name: (name as string).trim(),
       slug: productSlug,
@@ -318,6 +332,14 @@ router.post("/products", async (req, res) => {
       data: { ...product, _id: result.insertedId },
     });
   } catch (error) {
+    if (error instanceof VendorPlanLimitError) {
+      return res.status(error.statusCode).json({
+        success: false,
+        code: error.code,
+        message: error.message,
+        data: error.capacity,
+      });
+    }
     if (error instanceof AdminRouteError) {
       return res.status(error.statusCode).json({
         success: false,
@@ -345,6 +367,10 @@ router.put(
           message: "Invalid product ID.",
         });
       }
+
+      const existingProduct = await mongoDB.collection("products").findOne({
+        _id: new ObjectId(id),
+      });
 
       const {
         name,
@@ -417,6 +443,31 @@ router.put(
         }
       }
 
+      if (existingProduct) {
+        const targetVendorId = vendorId !== undefined
+          ? updateData.vendorId
+          : existingProduct.vendorId;
+        const targetAvailable = isAvailable !== undefined
+          ? isAvailable === true
+          : existingProduct.isAvailable === true;
+        const vendorChanged =
+          typeof targetVendorId === "string" &&
+          String(existingProduct.vendorId ?? "") !== targetVendorId;
+        if (
+          typeof targetVendorId === "string" &&
+          targetAvailable &&
+          (existingProduct.isAvailable !== true || vendorChanged)
+        ) {
+          assertActiveItemCapacity(
+            await checkActiveItemCapacity({
+              vendorId: targetVendorId,
+              plan: await getVendorPlan(targetVendorId),
+              excludeProductId: id,
+            }),
+          );
+        }
+      }
+
       updateData.updatedAt = new Date();
 
       const result = await mongoDB.collection("products").updateOne(
@@ -447,6 +498,14 @@ router.put(
         data: updatedProduct,
       });
     } catch (error) {
+      if (error instanceof VendorPlanLimitError) {
+        return res.status(error.statusCode).json({
+          success: false,
+          code: error.code,
+          message: error.message,
+          data: error.capacity,
+        });
+      }
       if (error instanceof AdminRouteError) {
         return res.status(error.statusCode).json({
           success: false,

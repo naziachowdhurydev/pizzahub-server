@@ -59,6 +59,10 @@ export function makeCustomerStatusNotification(input: {
   const orderId = String(order._id);
   const itemName = String(item.name ?? "An item");
   const messages: Partial<Record<OrderStatus, { title: string; message: string }>> = {
+    accepted: {
+      title: "Order item accepted",
+      message: `${vendorName} accepted ${itemName} in order #${orderId.slice(-6)}.`,
+    },
     confirmed: {
       title: "Order item accepted",
       message: `${vendorName} accepted ${itemName} in order #${orderId.slice(-6)}.`,

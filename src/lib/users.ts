@@ -11,6 +11,7 @@ export type UserDocument = {
   vendorAppliedAt?: Date;
   vendorApprovedAt?: Date;
   status?: unknown;
+  plan?: unknown;
   createdAt?: Date;
   updatedAt?: Date;
 };

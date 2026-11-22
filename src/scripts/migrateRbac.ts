@@ -17,6 +17,10 @@ async function migrate() {
       { $set: { status: "active" } },
     );
     await users.updateMany(
+      { $or: [{ plan: { $exists: false } }, { plan: null }] },
+      { $set: { plan: "free" } },
+    );
+    await users.updateMany(
       {
         role: "vendor",
         $or: [{ vendorStatus: { $exists: false } }, { vendorStatus: null }],
