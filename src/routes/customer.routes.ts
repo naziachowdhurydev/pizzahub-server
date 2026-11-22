@@ -6,36 +6,38 @@ import { applyVendorApplication } from "../controllers/vendor-applications.js";
 
 const router = Router();
 
+// Shared wishlist projection used by GET, POST and DELETE so every response
+// returns the same product list shape to the client.
+async function loadWishlistProducts(userId: string) {
+  const wishlist = await mongoDB.collection("wishlists").findOne({ userId });
+  const productIds = Array.isArray(wishlist?.productIds)
+    ? (wishlist.productIds as unknown[])
+        .map((id) => String(id))
+        .filter((id) => ObjectId.isValid(id))
+    : [];
+
+  if (productIds.length === 0) return [];
+
+  const products = await mongoDB
+    .collection("products")
+    .find({ _id: { $in: productIds.map((id) => new ObjectId(id)) } })
+    .toArray();
+  const byId = new Map(products.map((product) => [String(product._id), product]));
+
+  return productIds.flatMap((id) => {
+    const product = byId.get(id);
+    return product ? [product] : [];
+  });
+}
+
 router.get(
   "/wishlist",
   requireAuth,
   allowRoles("customer"),
   async (req, res) => {
     try {
-      const wishlist = await mongoDB.collection("wishlists").findOne({
-        userId: req.authUser!.id,
-      });
-      const productIds = Array.isArray(wishlist?.productIds)
-        ? (wishlist.productIds as unknown[]).filter((id) =>
-            ObjectId.isValid(String(id)),
-          )
-        : [];
-      if (productIds.length === 0) {
-        return res.json({ success: true, data: [] });
-      }
-
-      const products = await mongoDB
-        .collection("products")
-        .find({ _id: { $in: productIds.map((id) => new ObjectId(String(id))) } })
-        .toArray();
-      const byId = new Map(products.map((product) => [String(product._id), product]));
-      res.json({
-        success: true,
-        data: productIds.flatMap((id) => {
-          const product = byId.get(String(id));
-          return product ? [product] : [];
-        }),
-      });
+      const items = await loadWishlistProducts(req.authUser!.id);
+      res.json({ success: true, data: items });
     } catch (error) {
       console.error("Load wishlist failed:", error);
       res.status(500).json({ success: false, message: "Could not load wishlist." });
@@ -69,7 +71,12 @@ router.post(
         },
         { upsert: true },
       );
-      res.json({ success: true, message: "Pizza saved to your wishlist." });
+      const items = await loadWishlistProducts(req.authUser!.id);
+      res.json({
+        success: true,
+        message: "Pizza saved to your wishlist.",
+        data: items,
+      });
     } catch (error) {
       console.error("Save wishlist item failed:", error);
       res.status(500).json({ success: false, message: "Could not save this pizza." });
@@ -94,7 +101,12 @@ router.delete(
           $set: { updatedAt: new Date() },
         },
       );
-      res.json({ success: true, message: "Pizza removed from your wishlist." });
+      const items = await loadWishlistProducts(req.authUser!.id);
+      res.json({
+        success: true,
+        message: "Pizza removed from your wishlist.",
+        data: items,
+      });
     } catch (error) {
       console.error("Remove wishlist item failed:", error);
       res.status(500).json({ success: false, message: "Could not update wishlist." });
