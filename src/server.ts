@@ -15,7 +15,8 @@ app.use(cors({
   origin: clientUrl,
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
+  exposedHeaders: ["Set-Cookie"],
 }));
 
 // Better Auth must be mounted before express.json() because it reads the request stream.

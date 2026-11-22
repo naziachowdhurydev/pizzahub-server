@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "nodemon",
+    "dev:tsx": "tsx watch src/server.ts",
     "build": "tsc",
     "start": "node dist/server.js",
     "seed:data": "tsx src/scripts/seedData.ts",
@@ -24,6 +25,7 @@
     "@types/cors": "latest",
     "@types/express": "latest",
     "@types/node": "latest",
+    "nodemon": "^3.1.14",
     "tsx": "latest",
     "typescript": "latest"
   }
