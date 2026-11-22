@@ -63,7 +63,15 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
     return res.status(401).json({ success: false, message: "User no longer exists." });
   }
 
-  const role = user.role === "admin" || user.role === "vendor" ? user.role : "customer";
+  const role =
+    user.role === "admin" || user.role === "vendor" || user.role === "customer"
+      ? user.role
+      : user.role == null
+        ? "customer"
+        : null;
+  if (!role) {
+    return res.status(403).json({ success: false, message: "This account has an unsupported role." });
+  }
   const vendorStatus: VendorStatus =
     user.vendorStatus === "pending" ||
     user.vendorStatus === "approved" ||
@@ -92,7 +100,10 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
 
 export function allowRoles(...roles: string[]) {
   return (req: Request, res: Response, next: NextFunction) => {
-    if (!req.authUser || !roles.includes(req.authUser.role)) {
+    if (!req.authUser) {
+      return res.status(401).json({ success: false, message: "Authentication required." });
+    }
+    if (!roles.includes(req.authUser.role)) {
       return res.status(403).json({ success: false, message: "You do not have permission." });
     }
     next();
@@ -103,17 +114,7 @@ export const requireAdmin = allowRoles("admin");
 export const requireCustomer = allowRoles("customer");
 
 export function requireVendor(req: Request, res: Response, next: NextFunction) {
-  if (req.authUser?.role === "admin") {
-    // Admins may use vendor-scoped APIs, which still restrict records to their own vendor ID.
-    return next();
-  }
-  if (!req.authUser || req.authUser.role !== "vendor") {
-    return res.status(403).json({ success: false, message: "Vendor access is required." });
-  }
-  if (req.authUser.vendorStatus !== "approved") {
-    return res.status(403).json({ success: false, message: "Your vendor account is not approved." });
-  }
-  return next();
+  return requireApprovedVendor(req, res, next);
 }
 
 export function requireApprovedVendor(
@@ -121,7 +122,13 @@ export function requireApprovedVendor(
   res: Response,
   next: NextFunction,
 ) {
-  if (!req.authUser || req.authUser.role !== "vendor") {
+  if (!req.authUser) {
+    return res.status(401).json({ success: false, message: "Authentication required." });
+  }
+  if (req.authUser.role === "admin") {
+    return next();
+  }
+  if (req.authUser.role !== "vendor") {
     return res.status(403).json({ success: false, message: "Vendor access is required." });
   }
   if (req.authUser.vendorStatus !== "approved") {
