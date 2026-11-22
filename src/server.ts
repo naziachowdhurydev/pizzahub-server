@@ -22,7 +22,7 @@ app.use(cors({
 // Better Auth must be mounted before express.json() because it reads the request stream.
 app.all("/api/auth/*splat", toNodeHandler(auth));
 
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "8mb" }));
 app.use(express.urlencoded({ extended: true }));
 
 app.get("/api/health", (_req, res) => {
