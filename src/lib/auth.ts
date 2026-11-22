@@ -8,12 +8,29 @@ if (!secret || secret.length < 32) {
   throw new Error("BETTER_AUTH_SECRET must be at least 32 characters.");
 }
 
+const googleClientId = process.env.GOOGLE_CLIENT_ID;
+const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+
+// The client uses this flag to show Google sign-in only when the server can
+// actually complete the OAuth flow. Credentials always stay on the server.
+export const googleAuthEnabled = Boolean(googleClientId && googleClientSecret);
+
+const googleSocialProviders = googleAuthEnabled
+  ? {
+      google: {
+        clientId: googleClientId as string,
+        clientSecret: googleClientSecret as string,
+      },
+    }
+  : {};
+
 export const auth = betterAuth({
   appName: "PizzaHub",
   baseURL: process.env.BETTER_AUTH_URL || "http://localhost:5000",
   secret,
   trustedOrigins: [process.env.CLIENT_URL || "http://localhost:3000"],
   database: mongodbAdapter(mongoDB, { client: mongoClient }),
+  ...(googleAuthEnabled ? { socialProviders: googleSocialProviders } : {}),
   emailAndPassword: {
     enabled: true,
     minPasswordLength: 8,

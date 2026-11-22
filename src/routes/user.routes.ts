@@ -1,9 +1,14 @@
 import { Router } from "express";
 import { fromNodeHeaders } from "better-auth/node";
-import { auth } from "../lib/auth.js";
+import { auth, googleAuthEnabled } from "../lib/auth.js";
 import { requireAuth } from "../middleware/auth.js";
 
 const router = Router();
+
+// Public capability flag for the login/register screens. No credentials are exposed.
+router.get("/auth-providers", (_req, res) => {
+  res.json({ success: true, data: { google: googleAuthEnabled } });
+});
 
 router.get("/me", requireAuth, async (req, res) => {
   try {
