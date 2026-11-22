@@ -9,15 +9,37 @@ const router = Router();
 // Collection name for saved items (per user)
 // Document shape: { userId: string, items: Array<{ productId: ObjectId, size?: string, savedAt: Date }> }
 
+type SavedItem = {
+  productId: ObjectId;
+  size?: string;
+  savedAt: Date;
+};
+
+type SavedDocument = {
+  userId: string;
+  items: SavedItem[];
+};
+
+type CartItem = {
+  productId: ObjectId;
+  size?: string;
+  quantity: number;
+};
+
+type CartDocument = {
+  userId: string;
+  items: CartItem[];
+};
+
 /** Helper to get or create the saved doc */
-async function getSavedDoc(userId: string) {
-  const coll = mongoDB.collection("saved");
-  let doc = await coll.findOne({ userId });
-  if (!doc) {
-    doc = { userId, items: [] } as any;
-    await coll.insertOne(doc);
-  }
-  return doc as { userId: string; items: any[] };
+async function getSavedDoc(userId: string): Promise<SavedDocument> {
+  const coll = mongoDB.collection<SavedDocument>("saved");
+  const doc = await coll.findOne({ userId });
+  if (doc) return doc;
+
+  const newDoc: SavedDocument = { userId, items: [] };
+  await coll.insertOne(newDoc);
+  return newDoc;
 }
 
 // GET saved items for the authenticated user
@@ -56,7 +78,7 @@ router.post(
         return res.json({ success: true, message: "Item already saved." });
       }
       await mongoDB
-        .collection("saved")
+        .collection<SavedDocument>("saved")
         .updateOne(
           { userId: req.authUser!.id },
           {
@@ -85,7 +107,7 @@ router.delete(
     }
     try {
       await mongoDB
-        .collection("saved")
+        .collection<SavedDocument>("saved")
         .updateOne(
           { userId: req.authUser!.id },
           { $pull: { items: { productId: new ObjectId(productId) } } },
@@ -118,7 +140,7 @@ router.post(
         return res.status(404).json({ success: false, message: "Product not found." });
       }
       // Add to cart (reuse same shape as client addToCart)
-      await mongoDB.collection("carts").updateOne(
+      await mongoDB.collection<CartDocument>("carts").updateOne(
         { userId: req.authUser!.id },
         {
           $push: {
@@ -134,7 +156,7 @@ router.post(
       );
       // Remove from saved list
       await mongoDB
-        .collection("saved")
+        .collection<SavedDocument>("saved")
         .updateOne(
           { userId: req.authUser!.id },
           { $pull: { items: { productId: new ObjectId(productId) } } },
