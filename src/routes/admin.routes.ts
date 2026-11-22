@@ -3,7 +3,7 @@ import { Router } from "express";
 import type { RequestHandler } from "express";
 import { ObjectId, type Filter } from "mongodb";
 import { mongoClient, mongoDB } from "../config/db.js";
-import { requireAdmin, requireAuth } from "../middleware/auth.js";
+import { requireAuth, verifyAdmin } from "../middleware/auth.js";
 import {
   getAdminOrder,
   listAdminOrders,
@@ -20,31 +20,26 @@ import {
 
 const router = Router();
 
+// Every /api/admin/* route is admin-only by default, including routes added later.
+router.use(requireAuth, verifyAdmin);
+
 router.get(
   "/notifications",
-  requireAuth,
-  requireAdmin,
   listOrderNotifications("admin"),
 );
 router.patch(
   "/notifications/:id/read",
-  requireAuth,
-  requireAdmin,
   markOrderNotificationRead("admin"),
 );
-router.get("/order-issues", requireAuth, requireAdmin, listAdminOrderIssues);
+router.get("/order-issues", listAdminOrderIssues);
 router.patch(
   "/order-issues/:id",
-  requireAuth,
-  requireAdmin,
   updateAdminOrderIssue,
 );
-router.get("/orders", requireAuth, requireAdmin, listAdminOrders);
-router.get("/orders/:id", requireAuth, requireAdmin, getAdminOrder);
+router.get("/orders", listAdminOrders);
+router.get("/orders/:id", getAdminOrder);
 router.patch(
   "/orders/:id/status",
-  requireAuth,
-  requireAdmin,
   updateAdminOrderStatus,
 );
 
@@ -220,7 +215,7 @@ async function resolveProductVendorId(value: unknown): Promise<string | null> {
 }
 
 // GET: View all products
-router.get("/products", requireAuth, requireAdmin, async (_req, res) => {
+router.get("/products", async (_req, res) => {
   try {
     const products = await mongoDB
       .collection("products")
@@ -237,7 +232,7 @@ router.get("/products", requireAuth, requireAdmin, async (_req, res) => {
   }
 });
 
-router.get("/vendors/approved", requireAuth, requireAdmin, async (_req, res) => {
+router.get("/vendors/approved", async (_req, res) => {
   try {
     const vendors = await mongoDB
       .collection<AuthUserDocument>("user")
@@ -266,7 +261,7 @@ router.get("/vendors/approved", requireAuth, requireAdmin, async (_req, res) => 
 });
 
 // POST: Add a new product
-router.post("/products", requireAuth, requireAdmin, async (req, res) => {
+router.post("/products", async (req, res) => {
   try {
     const body = req.body as Record<string, unknown> | null;
     const { name, slug, description, category, price, image, vendorId } =
@@ -340,8 +335,6 @@ router.post("/products", requireAuth, requireAdmin, async (req, res) => {
 // PUT: Update a product
 router.put(
   "/products/:id",
-  requireAuth,
-  requireAdmin,
   async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -472,8 +465,6 @@ router.put(
 // DELETE: Delete a product
 router.delete(
   "/products/:id",
-  requireAuth,
-  requireAdmin,
   async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -510,7 +501,7 @@ router.delete(
 );
 
 // GET: View all users
-router.get("/users", requireAuth, requireAdmin, async (_req, res) => {
+router.get("/users", async (_req, res) => {
   try {
     const users = await mongoDB
       .collection("user")
@@ -542,7 +533,7 @@ router.get("/users", requireAuth, requireAdmin, async (_req, res) => {
   }
 });
 
-router.get("/users/:id", requireAuth, requireAdmin, async (req, res) => {
+router.get("/users/:id", async (req, res) => {
   try {
     const user = await mongoDB.collection<AuthUserDocument>("user").findOne(
       authUserFilter(String(req.params.id)),
@@ -575,8 +566,6 @@ router.get("/users/:id", requireAuth, requireAdmin, async (req, res) => {
 
 router.get(
   "/users/:id/details",
-  requireAuth,
-  requireAdmin,
   async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -641,8 +630,6 @@ router.get(
 
 router.patch(
   "/users/:id/role",
-  requireAuth,
-  requireAdmin,
   async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -710,8 +697,6 @@ router.patch(
 
 router.patch(
   "/users/:id/status",
-  requireAuth,
-  requireAdmin,
   async (req, res) => {
     try {
       const id = String(req.params.id);
@@ -775,12 +760,10 @@ const listPendingApplications: RequestHandler = async (_req, res) => {
   }
 };
 
-router.get("/vendors/pending", requireAuth, requireAdmin, listPendingApplications);
+router.get("/vendors/pending", listPendingApplications);
 
 router.get(
   "/vendors/applications",
-  requireAuth,
-  requireAdmin,
   async (_req, res) => {
     try {
       const applications = await mongoDB
@@ -801,14 +784,10 @@ router.get(
 
 router.patch(
   "/vendors/:id/approve",
-  requireAuth,
-  requireAdmin,
   reviewApplication("approved"),
 );
 router.patch(
   "/vendors/:id/reject",
-  requireAuth,
-  requireAdmin,
   reviewApplication("rejected"),
 );
 
@@ -826,15 +805,11 @@ const reviewLegacyApplication: RequestHandler = (req, res, next) => {
 
 router.patch(
   "/vendors/applications/:id",
-  requireAuth,
-  requireAdmin,
   reviewLegacyApplication,
 );
 
 router.get(
   "/analytics",
-  requireAuth,
-  requireAdmin,
   async (_req, res) => {
     try {
       const [users, customers, vendors, pendingVendors, products, orders] = await Promise.all([

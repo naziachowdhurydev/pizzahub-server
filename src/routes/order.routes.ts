@@ -3,9 +3,9 @@ import { Router } from "express";
 import { ObjectId } from "mongodb";
 import { mongoDB } from "../config/db.js";
 import {
-  requireAdmin,
   requireAuth,
   requireCustomer,
+  verifyAdmin,
 } from "../middleware/auth.js";
 import {
   getItemStatus,
@@ -522,55 +522,47 @@ router.patch("/:id/cancel", requireAuth, requireCustomer, async (req, res) => {
   }
 });
 
-// Admin: Get all orders
-router.get("/admin/all", requireAuth, requireAdmin, listAdminOrders);
+// Admin-only order routes are mounted behind requireAuth + verifyAdmin.
+const adminRouter = Router();
+adminRouter.use(requireAuth, verifyAdmin);
 
-// Admin: Update order status
-router.patch(
-  "/admin/:id/status",
-  requireAuth,
-  requireAdmin,
-  updateAdminOrderStatus,
-);
+adminRouter.get("/all", listAdminOrders);
+adminRouter.patch("/:id/status", updateAdminOrderStatus);
 
-// Admin: Delete an order
-router.delete(
-  "/admin/:id",
-  requireAuth,
-  requireAdmin,
-  async (req, res) => {
-    try {
-   const id = String(req.params.id);
+adminRouter.delete("/:id", async (req, res) => {
+  try {
+    const id = String(req.params.id);
 
-      if (!ObjectId.isValid(id)) {
-        return res.status(400).json({
-          success: false,
-          message: "Invalid order ID.",
-        });
-      }
-
-      const result = await mongoDB.collection("orders").deleteOne({
-        _id: new ObjectId(id),
-      });
-
-      if (result.deletedCount === 0) {
-        return res.status(404).json({
-          success: false,
-          message: "Order not found.",
-        });
-      }
-
-      res.json({
-        success: true,
-        message: "Order deleted successfully.",
-      });
-    } catch {
-      res.status(500).json({
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({
         success: false,
-        message: "Could not delete order.",
+        message: "Invalid order ID.",
       });
     }
+
+    const result = await mongoDB.collection("orders").deleteOne({
+      _id: new ObjectId(id),
+    });
+
+    if (result.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found.",
+      });
+    }
+
+    res.json({
+      success: true,
+      message: "Order deleted successfully.",
+    });
+  } catch {
+    res.status(500).json({
+      success: false,
+      message: "Could not delete order.",
+    });
   }
-);
+});
+
+router.use("/admin", adminRouter);
 
 export default router;

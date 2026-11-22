@@ -110,7 +110,19 @@ export function allowRoles(...roles: string[]) {
   };
 }
 
-export const requireAdmin = allowRoles("admin");
+// Explicit admin guard. Role comes from the current MongoDB user loaded by requireAuth,
+// never from a JWT claim or request body.
+export function verifyAdmin(req: Request, res: Response, next: NextFunction) {
+  if (!req.authUser) {
+    return res.status(401).json({ success: false, message: "Authentication required." });
+  }
+  if (req.authUser.role !== "admin") {
+    return res.status(403).json({ success: false, message: "Admin access is required." });
+  }
+  return next();
+}
+
+export const requireAdmin = verifyAdmin;
 export const requireCustomer = allowRoles("customer");
 
 export function requireVendor(req: Request, res: Response, next: NextFunction) {

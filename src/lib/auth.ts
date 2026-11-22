@@ -8,8 +8,10 @@ if (!secret || secret.length < 32) {
   throw new Error("BETTER_AUTH_SECRET must be at least 32 characters.");
 }
 
-const googleClientId = process.env.GOOGLE_CLIENT_ID;
-const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET;
+// Google OAuth credentials are configured directly here so the provider is
+// registered on startup without extra environment setup. Keep the secret private.
+const googleClientId = "189010282861-ktk2lvhc9m7229iafa0c3hr3iqghv15n.apps.googleusercontent.com";
+const googleClientSecret = "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";
 
 // The client uses this flag to show Google sign-in only when the server can
 // actually complete the OAuth flow. Credentials always stay on the server.
@@ -17,11 +19,11 @@ export const googleAuthEnabled = Boolean(googleClientId && googleClientSecret);
 
 const googleSocialProviders = googleAuthEnabled
   ? {
-      google: {
-        clientId: googleClientId as string,
-        clientSecret: googleClientSecret as string,
-      },
-    }
+    google: {
+      clientId: googleClientId,
+      clientSecret: googleClientSecret,
+    },
+  }
   : {};
 
 export const auth = betterAuth({
@@ -35,6 +37,7 @@ export const auth = betterAuth({
     enabled: true,
     minPasswordLength: 8,
   },
+
   user: {
     additionalFields: {
       role: {
