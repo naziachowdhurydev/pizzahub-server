@@ -2,6 +2,7 @@ import { betterAuth } from "better-auth";
 import { mongodbAdapter } from "@better-auth/mongo-adapter";
 import { jwt } from "better-auth/plugins";
 import { mongoClient, mongoDB } from "../config/db.js";
+import { getServerBaseUrl } from "./base-url.js";
 
 const secret = process.env.BETTER_AUTH_SECRET;
 if (!secret || secret.length < 32) {
@@ -28,7 +29,7 @@ const googleSocialProviders = googleAuthEnabled
 
 export const auth = betterAuth({
   appName: "PizzaHub",
-  baseURL: process.env.BETTER_AUTH_URL || "http://localhost:5000",
+  baseURL: getServerBaseUrl(),
   secret,
   trustedOrigins: [process.env.CLIENT_URL || "http://localhost:3000"],
   database: mongodbAdapter(mongoDB, { client: mongoClient }),

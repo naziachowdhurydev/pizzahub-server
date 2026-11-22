@@ -10,10 +10,7 @@ import apiRoutes from "./routes/index.js";
 const app = express();
 const port = Number(process.env.PORT || 5000);
 const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
-
-app.listen(port, () => {
-  console.log(`Example app listening on port ${port}`);
-});
+const isServerless = Boolean(process.env.VERCEL);
 
 app.use(cors({
   origin: clientUrl,
@@ -41,13 +38,15 @@ app.use((_req, res) => {
 
 async function start() {
   await connectDatabase();
+  // Serverless invocations reuse the exported app; no local listener or background timer.
+  if (isServerless) return;
   await startVendorResponseMonitor();
   app.listen(port, () => console.log(`PizzaHub server running at http://localhost:${port}`));
 }
 
 start().catch(error => {
   console.error("Server startup failed:", error);
-  process.exit(1);
+  if (!isServerless) process.exit(1);
 });
 
 export default app;

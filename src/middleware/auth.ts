@@ -4,6 +4,7 @@ import { mongoDB } from "../config/db.js";
 import type { UserDocument } from "../lib/users.js";
 import { userFilterById } from "../lib/users.js";
 import { normalizeVendorPlan, type VendorPlan } from "../lib/vendor-plan.js";
+import { getServerBaseUrl } from "../lib/base-url.js";
 
 export type UserRole = "customer" | "vendor" | "admin";
 export type VendorStatus = "not_applied" | "pending" | "approved" | "rejected";
@@ -26,7 +27,7 @@ declare global {
   }
 }
 
-const authBaseUrl = process.env.BETTER_AUTH_URL || "http://localhost:5000";
+const authBaseUrl = getServerBaseUrl();
 const jwks = createRemoteJWKSet(new URL(`${authBaseUrl}/api/auth/jwks`));
 
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
