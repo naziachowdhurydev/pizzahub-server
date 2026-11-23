@@ -51,13 +51,63 @@ export const auth = betterAuth({
     minPasswordLength: 8,
   },
 
+  // Sign-up can choose only customer or vendor. Admin is assigned separately
+  // by an administrator, never by the browser.
+  databaseHooks: {
+    user: {
+      create: {
+        before: async (user) => {
+          const isVendor = user.role === "vendor";
+          const now = new Date();
+          return {
+            data: {
+              role: isVendor ? "vendor" : "customer",
+              status: "active",
+              plan: "free",
+              vendorStatus: isVendor ? "approved" : "not_applied",
+              ...(isVendor
+                ? { vendorAppliedAt: now, vendorApprovedAt: now }
+                : {}),
+            },
+          };
+        },
+        after: async (user) => {
+          if (user.role !== "vendor") return;
+          // Give every new vendor a store record so the dashboard is usable
+          // immediately after sign-up.
+          const store = await mongoDB.collection("stores").findOne({ ownerId: user.id });
+          if (store) return;
+          const now = new Date();
+          await mongoDB.collection("stores").updateOne(
+            { ownerId: user.id },
+            {
+              $setOnInsert: {
+                ownerId: user.id,
+                storeName: `${user.name}'s Pizza Shop`,
+                description: "",
+                phone: "",
+                address: "",
+                createdAt: now,
+              },
+              $set: { updatedAt: now },
+            },
+            { upsert: true },
+          );
+        },
+      },
+    },
+  },
+
   user: {
     additionalFields: {
       role: {
         type: "string",
         required: false,
         defaultValue: "customer",
-        input: false,
+        input: true,
+        transform: {
+          input: (value) => (value === "vendor" ? "vendor" : "customer"),
+        },
       },
       vendorStatus: {
         type: "string",
