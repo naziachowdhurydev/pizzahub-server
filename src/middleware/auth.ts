@@ -10,9 +10,17 @@ export type UserRole = "customer" | "vendor" | "admin";
 export type VendorStatus = "not_applied" | "pending" | "approved" | "rejected";
 export type AccountStatus = "active" | "suspended";
 
+export type TokenSession = {
+  id?: string;
+  createdAt?: string;
+  expiresAt?: string;
+  updatedAt?: string;
+};
+
 declare global {
   namespace Express {
     interface Request {
+      authSession?: TokenSession;
       authUser?: {
         id: string;
         name: string;
@@ -48,6 +56,12 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       return res.status(401).json({ success: false, message: "Invalid token subject." });
     }
     subject = payload.sub;
+    req.authSession = {
+      id: typeof payload.jti === "string" ? payload.jti : undefined,
+      createdAt: typeof payload.iat === "number" ? new Date(payload.iat * 1000).toISOString() : undefined,
+      expiresAt: typeof payload.exp === "number" ? new Date(payload.exp * 1000).toISOString() : undefined,
+      updatedAt: typeof payload.iat === "number" ? new Date(payload.iat * 1000).toISOString() : undefined,
+    };
   } catch (error) {
     console.error("JWT verification failed:", error);
     return res.status(401).json({ success: false, message: "Invalid or expired token." });

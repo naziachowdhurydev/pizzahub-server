@@ -124,28 +124,22 @@ router.post("/me/image", requireAuth, async (req, res) => {
 });
 
 router.get("/me", requireAuth, async (req, res) => {
-  try {
-    const sessionData = await auth.api.getSession({
-      headers: fromNodeHeaders(req.headers),
-    });
+  // The client may call this endpoint with a Bearer token only (no cookie).
+  // Fall back to the verified JWT claims so session info still comes from the server.
+  const cookieSession = await auth.api
+    .getSession({ headers: fromNodeHeaders(req.headers) })
+    .catch(() => null);
 
-    res.json({
-      success: true,
-      data: {
-        user: req.authUser,
-        session: sessionData?.session
-          ? {
-              id: sessionData.session.id,
-              createdAt: sessionData.session.createdAt,
-              expiresAt: sessionData.session.expiresAt,
-              updatedAt: sessionData.session.updatedAt,
-            }
-          : null,
-      },
-    });
-  } catch {
-    res.status(500).json({ success: false, message: "Could not load profile session." });
-  }
+  const session = cookieSession?.session
+    ? {
+        id: cookieSession.session.id,
+        createdAt: cookieSession.session.createdAt,
+        expiresAt: cookieSession.session.expiresAt,
+        updatedAt: cookieSession.session.updatedAt,
+      }
+    : req.authSession ?? null;
+
+  res.json({ success: true, data: { user: req.authUser, session } });
 });
 
 export default router;

@@ -3,17 +3,27 @@ import express from "express";
 import cors from "cors";
 import { toNodeHandler } from "better-auth/node";
 import { auth } from "./lib/auth.js";
+import { getServerBaseUrl } from "./lib/base-url.js";
 import { connectDatabase } from "./config/db.js";
 import { startVendorResponseMonitor } from "./lib/order-notifications.js";
 import apiRoutes from "./routes/index.js";
 
 const app = express();
 const port = Number(process.env.PORT || 5000);
-const clientUrl = process.env.CLIENT_URL || "http://localhost:3000";
 const isServerless = Boolean(process.env.VERCEL);
+const allowedOrigins = [
+  process.env.CLIENT_URL,
+  getServerBaseUrl(),
+  ...(isServerless ? [] : ["http://localhost:3000", "http://localhost:5000"]),
+]
+  .map((origin) => origin?.trim().replace(/\/+$/, ""))
+  .filter((origin): origin is string => Boolean(origin));
 
 app.use(cors({
-  origin: clientUrl,
+  origin: (origin, callback) => {
+    const isPreviewClient = Boolean(origin && /^https:\/\/pizzahub-client-[a-z0-9-]+\.vercel\.app$/i.test(origin));
+    callback(null, !origin || allowedOrigins.includes(origin) || isPreviewClient);
+  },
   credentials: true,
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization", "Cookie"],
@@ -37,9 +47,10 @@ app.use((_req, res) => {
 });
 
 async function start() {
-  await connectDatabase();
-  // Serverless invocations reuse the exported app; no local listener or background timer.
+  // On Vercel the MongoDB driver connects lazily on the first operation.
+  // Awaiting a ping here would fail cold starts before any request is handled.
   if (isServerless) return;
+  await connectDatabase();
   await startVendorResponseMonitor();
   app.listen(port, () => console.log(`PizzaHub server running at http://localhost:${port}`));
 }

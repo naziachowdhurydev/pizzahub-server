@@ -27,11 +27,23 @@ const googleSocialProviders = googleAuthEnabled
   }
   : {};
 
+const authBaseUrl = getServerBaseUrl();
+
+// Requests reach this server through the client app's same-origin proxy, so the
+// browser Origin header is the client origin (not the API deployment URL).
+const trustedOrigins = [
+  authBaseUrl,
+  process.env.CLIENT_URL,
+  ...(process.env.VERCEL ? ["https://pizzahub-client-*.vercel.app"] : ["http://localhost:3000", "http://localhost:5000"]),
+]
+  .map((origin) => origin?.trim().replace(/\/+$/, ""))
+  .filter((origin): origin is string => Boolean(origin));
+
 export const auth = betterAuth({
   appName: "PizzaHub",
-  baseURL: getServerBaseUrl(),
+  baseURL: authBaseUrl,
   secret,
-  trustedOrigins: [process.env.CLIENT_URL || "http://localhost:3000"],
+  trustedOrigins: Array.from(new Set(trustedOrigins)),
   database: mongodbAdapter(mongoDB, { client: mongoClient }),
   ...(googleAuthEnabled ? { socialProviders: googleSocialProviders } : {}),
   emailAndPassword: {
