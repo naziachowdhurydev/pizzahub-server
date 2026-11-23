@@ -9,20 +9,20 @@ if (!secret || secret.length < 32) {
   throw new Error("BETTER_AUTH_SECRET must be at least 32 characters.");
 }
 
-// Google OAuth credentials are configured directly here so the provider is
-// registered on startup without extra environment setup. Keep the secret private.
-const googleClientId = "189010282861-ktk2lvhc9m7229iafa0c3hr3iqghv15n.apps.googleusercontent.com";
-const googleClientSecret = "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";
+// Google OAuth credentials stay server-side as Vercel environment variables.
+// The browser only ever sees the generated authorize URL, never the secret.
+const googleClientId = process.env.GOOGLE_CLIENT_ID?.trim();
+const googleClientSecret = process.env.GOOGLE_CLIENT_SECRET?.trim();
 
 // The client uses this flag to show Google sign-in only when the server can
-// actually complete the OAuth flow. Credentials always stay on the server.
+// actually complete the OAuth flow.
 export const googleAuthEnabled = Boolean(googleClientId && googleClientSecret);
 
 const googleSocialProviders = googleAuthEnabled
   ? {
     google: {
-      clientId: googleClientId,
-      clientSecret: googleClientSecret,
+      clientId: googleClientId!,
+      clientSecret: googleClientSecret!,
     },
   }
   : {};
@@ -34,7 +34,7 @@ const authBaseUrl = getServerBaseUrl();
 const trustedOrigins = [
   authBaseUrl,
   process.env.CLIENT_URL,
-  ...(process.env.VERCEL ? ["https://pizzahub-client-*.vercel.app"] : ["http://localhost:3000", "http://localhost:5000"]),
+  ...(process.env.VERCEL ? [] : ["http://localhost:3000", "http://localhost:5000"]),
 ]
   .map((origin) => origin?.trim().replace(/\/+$/, ""))
   .filter((origin): origin is string => Boolean(origin));
